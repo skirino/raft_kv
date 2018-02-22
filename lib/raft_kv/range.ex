@@ -1,0 +1,561 @@
+use Croma
+
+defmodule RaftKV.Range do
+  alias RaftedValue.Data, as: RVData
+  alias RaftKV.Hash
+
+  defmodule Status do
+    # This represents state machine state of each range in the context of splitting/merging protocol.
+    #
+    # Statuses:
+    # - Right after creation, consensus group state is `:uninitialized` instead of a `Range.t`.
+    #   `:uninitialized` consensus group soon becomes either
+    #   `:normal` (if it's the 1st range) or `:pre_split_latter` (if it's created for a range split)
+    # - `:pre_split_former` and `:pre_merge_latter` are the sender side of data;
+    #   they must remember all commands that have been applied to data to be transferred.
+    # - `:post_split_former` and `:post_merge_latter` don't add new commands but they should keep commands
+    #   that had been accumulated during `:pre_split_former` and `:pre_merge_latter`, respectively, in order to facilitate retrying.
+    #     - In the case of `:post_split_former` those commands are discarded once it becomes `:normal` (i.e., on completion of splitting).
+    #     - A range (consensus group) in `:post_merge_latter` is simply to be removed.
+    #
+    # Client interactions:
+    # - `:pre_split_latter` and `:post_merge_latter` return errors on receipt of commands/queries.
+    #     - `:pre_split_latter` doesn't own any key range yet (will soon start to own the latter half).
+    #     - `:post_merge_latter` no longer owns any key range.
+    #     - The error handling is implemented by adjusting `range_start` and `range_end` in `Range.t`, not by looking at `status`.
+    # - `:pre_split_latter` and `:pre_merge_former` are the receiver side of data;
+    #   on receipt of commands/queries, they return errors that indicate
+    #   "I'm not yet allowed to handle your command/query but will soon become the owner of the key. Please retry!".
+
+    @type key_command_pair :: {key :: any, command_arg :: any}
+
+    @type t :: :normal
+             | {:pre_split_former , commands :: [key_command_pair]}
+             | {:pre_split_latter , range_start_after_split :: Hash.t}
+             | {:post_split_former, commands :: [key_command_pair]}
+             | {:pre_merge_former , next_range_data :: map}
+             | {:pre_merge_latter , commands :: [key_command_pair]}
+             | {:post_merge_latter, commands :: [key_command_pair]}
+
+    defun valid?(t :: any) :: boolean do
+      :normal                                -> true
+      {:pre_split_former , _commands}        -> true
+      {:pre_split_latter , _range_start}     -> true
+      {:post_split_former, _commands}        -> true
+      {:pre_merge_former , _next_range_data} -> true
+      {:pre_merge_latter , _commands}        -> true
+      {:post_merge_latter, _commands}        -> true
+      _                                      -> false
+    end
+
+    defun remember_command(t :: t, which :: :former | :latter, command :: {any, any}) :: t do
+      ({:pre_split_former, cs}, :latter, c ) -> {:pre_split_former, [c | cs]}
+      ({:pre_merge_latter, cs}, _which , c ) -> {:pre_merge_latter, [c | cs]}
+      (status                 , _which , _c) -> status
+    end
+  end
+
+  defmodule KeysMap do
+    # %{key => {keyed_value, size}}
+    use Croma.SubtypeOfMap, key_module: Croma.Any, value_module: Croma.Tuple
+  end
+
+  use Croma.Struct, fields: [
+    keyspace_name:    Croma.Atom,
+    data_module:      Croma.Atom,
+    hook_module:      Croma.TypeGen.nilable(Croma.Atom),
+    status:           Status,
+    range_start:      Croma.NonNegInteger,
+    range_middle:     Croma.NonNegInteger,
+    range_end:        Croma.NonNegInteger,
+    keys_former_half: KeysMap,
+    keys_latter_half: KeysMap,
+    size_former_half: Croma.NonNegInteger,
+    size_latter_half: Croma.NonNegInteger,
+  ]
+
+  @behaviour RVData
+
+  @impl true
+  defun new() :: :uninitialized do
+    :uninitialized
+  end
+
+  #
+  # command
+  #
+  @impl true
+  defun command(state0 :: v[:uninitialized | t], arg :: RVData.command_arg) :: {RVData.command_ret, t} do
+    case state0 do
+      :uninitialized ->
+        case arg do
+          {:split_install, latter_range_start, data}               -> {:ok, split_install(latter_range_start, data)}
+          {:init_1st, ks_name, data_mod, hook_mod, r_start, r_end} -> {:ok, make_struct(ks_name, data_mod, hook_mod, r_start, r_end)}
+          _                                                        -> {{:error, :uninitialized}, :uninitialized}
+        end
+      state ->
+        case arg do
+          {:c, key, command_arg}                             -> command_impl(state, key, command_arg)
+          {:split_prepare, latter_range_start}               -> split_prepare(state, latter_range_start)
+          {:split_install, _latter_range_start, _data}       -> {{:error, :already_initialized}, state}
+          {:split_shift_range_end, latter_range_start}       -> split_shift_range_end(state, latter_range_start)
+          {:split_shift_range_start, cmds}                   -> split_shift_range_start(state, cmds)
+          :split_discard_commands                            -> {:ok, split_discard_commands(state)}
+          :merge_prepare                                     -> merge_prepare(state)
+          {:merge_install, data}                             -> merge_install(state, data)
+          :merge_shift_range_start                           -> merge_shift_range_start(state)
+          {:merge_shift_range_end, latter_range_start, cmds} -> merge_shift_range_end(state, latter_range_start, cmds)
+          {:init_1st, _n, _d, _h, _s, _e}                    -> {{:error, :already_initialized}, state}
+          _                                                  -> {:ok, state}
+        end
+    end
+  end
+
+  defp make_struct(ks_name, data_mod, hook_mod, r_start, r_end) do
+    %__MODULE__{
+      keyspace_name:    ks_name,
+      data_module:      data_mod,
+      hook_module:      hook_mod,
+      status:           :normal,
+      range_start:      r_start,
+      range_middle:     div(r_start + r_end, 2),
+      range_end:        r_end,
+      keys_former_half: %{},
+      keys_latter_half: %{},
+      size_former_half: 0,
+      size_latter_half: 0,
+    }
+  end
+
+  defp split_install(r_start, data) do
+    %{
+      keyspace_name:    ks_name,
+      data_module:      d,
+      hook_module:      h,
+      range_end:        r_end,
+      keys_latter_half: keys,
+    } = data
+    r_middle = div(r_start + r_end, 2)
+    {keys1, size1, keys2, size2} = split_keys_map(ks_name, r_middle, keys)
+    %__MODULE__{
+      keyspace_name:    ks_name,
+      data_module:      d,
+      hook_module:      h,
+      status:           {:pre_split_latter, r_start},
+      range_start:      r_end, # temporarily become an empty range
+      range_middle:     r_middle,
+      range_end:        r_end,
+      keys_former_half: keys1,
+      keys_latter_half: keys2,
+      size_former_half: size1,
+      size_latter_half: size2,
+    }
+  end
+
+  defp split_keys_map(ks_name, r_middle, keys) do
+    Enum.reduce(keys, {%{}, 0, %{}, 0}, fn({k, {_data, s} = pair}, {m1, s1, m2, s2}) ->
+      case Hash.from_key(ks_name, k) do
+        h when h < r_middle -> {Map.put(m1, k, pair), s1 + s, m2                  , s2    }
+        _                   -> {m1                  , s1    , Map.put(m2, k, pair), s2 + s}
+      end
+    end)
+  end
+
+  defp command_impl(state, key, command_arg) do
+    case check_key_position(state, key) do
+      {:error, _} = e -> {e, state}
+      :former         -> apply_command_on_former_half(state, key, command_arg)
+      :latter         -> apply_command_on_latter_half(state, key, command_arg)
+    end
+  end
+
+  defp check_key_position(%__MODULE__{keyspace_name: ks_name, status: status, range_start: s, range_middle: m, range_end: e}, key) do
+    case Hash.from_key(ks_name, key) do
+      h when h < s ->
+        case status do
+          {:pre_split_latter, new_range_start} when new_range_start <= h -> {:error, :will_own_the_key_retry_afterward}
+          _                                                              -> {:error, {:below_range, s}}
+        end
+      h when e <= h ->
+        case status do
+          {:pre_merge_former, %{range_end: new_range_end}} when h < new_range_end -> {:error, :will_own_the_key_retry_afterward}
+          _                                                                       -> {:error, {:above_range, e}}
+        end
+      h when h < m -> :former
+      _            -> :latter
+    end
+  end
+
+  Enum.each([:former, :latter], fn which ->
+    fun_name   = :"apply_command_on_#{which}_half"
+    keys_field = :"keys_#{which}_half"
+    size_field = :"size_#{which}_half"
+    defp unquote(fun_name)(%__MODULE__{:data_module        => d,
+                                       :status             => status,
+                                       unquote(keys_field) => keys,
+                                       unquote(size_field) => total} = state,
+                           key,
+                           command_arg) do
+      {data, size} = Map.get(keys, key, {nil, 0})
+      {ret, load, new_size, new_data} = d.command(data, size, key, command_arg)
+      {new_keys, new_total} =
+        case new_data do
+          nil -> {Map.delete(keys, key)                   , total            - size}
+          _   -> {Map.put(keys, key, {new_data, new_size}), total + new_size - size}
+        end
+      new_status = Status.remember_command(status, unquote(which), {key, command_arg})
+      new_state = %__MODULE__{state | :status => new_status, unquote(keys_field) => new_keys, unquote(size_field) => new_total}
+      {{:ok, ret, load}, new_state}
+    end
+  end)
+
+  #
+  # split
+  #
+  defp split_prepare(%__MODULE__{status:       status,
+                                 range_middle: r_middle,
+                                 range_end:    r_end} = state,
+                     latter_range_start) do
+    case status do
+      :normal                    when r_middle == latter_range_start -> become_pre_split_former(state)
+      {:pre_split_former, _cmds} when r_middle == latter_range_start -> become_pre_split_former(state)
+      {:post_split_former, cmds} when r_end    == latter_range_start -> {{:error, {:range_already_shifted, cmds}}, state}
+      _                                                              -> {error_status_unmatch(state), state}
+    end
+  end
+
+  defp become_pre_split_former(state) do
+    map_to_return = Map.take(state, [:keyspace_name, :data_module, :hook_module, :range_end, :keys_latter_half])
+    new_state = %__MODULE__{state | status: {:pre_split_former, []}}
+    {{:ok, map_to_return}, new_state}
+  end
+
+  defp split_shift_range_end(%__MODULE__{status:       status,
+                                         range_middle: r_middle,
+                                         range_end:    r_end} = state,
+                             latter_range_start) do
+    case status do
+      {:pre_split_former , cmds} when r_middle == latter_range_start -> {{:ok, cmds}, become_post_split_former(state, cmds)}
+      {:post_split_former, cmds} when r_end    == latter_range_start -> {{:ok, cmds}, state}
+      _                                                              -> {error_status_unmatch(state), state}
+    end
+  end
+
+  defp become_post_split_former(%__MODULE__{keyspace_name:    ks_name,
+                                            range_start:      r_start,
+                                            range_middle:     r_middle,
+                                            keys_former_half: keys} = state,
+                                cmds) do
+    new_r_middle = div(r_start + r_middle, 2)
+    {keys1, size1, keys2, size2} = split_keys_map(ks_name, new_r_middle, keys)
+    %__MODULE__{state |
+      status:           {:post_split_former, cmds},
+      range_middle:     new_r_middle,
+      range_end:        r_middle,
+      keys_former_half: keys1,
+      keys_latter_half: keys2,
+      size_former_half: size1,
+      size_latter_half: size2,
+    }
+  end
+
+  defp split_shift_range_start(%__MODULE__{status: status} = state, cmds) do
+    case status do
+      {:pre_split_latter, new_range_start} -> {:ok, become_normal_and_apply_commands(state, new_range_start, cmds)}
+      _                                    -> {error_status_unmatch(state), state}
+    end
+  end
+
+  defp become_normal_and_apply_commands(state0, new_range_start, cmds) do
+    state = %__MODULE__{state0 | status: :normal, range_start: new_range_start}
+    Enum.reduce(cmds, state, fn({key, arg}, s1) ->
+      {_ret, s2} = command_impl(s1, key, arg)
+      s2
+    end)
+  end
+
+  defp split_discard_commands(%__MODULE__{status: status} = state) do
+    case status do
+      {:post_split_former, _cmds} -> %__MODULE__{state | status: :normal}
+      _                           -> state
+    end
+  end
+
+  defp error_status_unmatch(%__MODULE__{status: status, range_start: r_start, range_end: r_end}) do
+    label =
+      case status do
+        :normal -> :normal
+        {l, _}  -> l
+      end
+    {:error, {:status_unmatch, label, r_start, r_end}}
+  end
+
+  #
+  # merge
+  #
+  defp merge_prepare(%__MODULE__{status: status} = state) do
+    case status do
+      :normal                    -> become_pre_merge_latter(state)
+      {:pre_merge_latter, _cmds} -> become_pre_merge_latter(state)
+      {:post_merge_latter, cmds} -> {{:error, {:range_already_shifted, cmds}}, state}
+      _                          -> {error_status_unmatch(state), state}
+    end
+  end
+
+  defp become_pre_merge_latter(state) do
+    map_to_return = Map.take(state, [:range_start, :range_middle, :range_end, :keys_former_half, :keys_latter_half, :size_former_half, :size_latter_half])
+    new_state = %__MODULE__{state | status: {:pre_merge_latter, []}}
+    {{:ok, map_to_return}, new_state}
+  end
+
+  defp merge_install(%__MODULE__{status:    status,
+                                 range_end: r_end} = state,
+                     %{range_start: next_range_start} = data) do
+    case status do
+      :normal                               when r_end == next_range_start -> {:ok, %__MODULE__{state | status: {:pre_merge_former, data}}}
+      {:pre_merge_former, _next_range_data} when r_end == next_range_start -> {:ok, %__MODULE__{state | status: {:pre_merge_former, data}}}
+      _                                                                    -> {error_status_unmatch(state), state}
+    end
+  end
+
+  defp merge_shift_range_start(%__MODULE__{status: status} = state) do
+    case status do
+      {:pre_merge_latter , cmds} -> {{:ok, cmds}, become_post_merge_latter(state, cmds)}
+      {:post_merge_latter, cmds} -> {{:ok, cmds}, state}
+      _                          -> {error_status_unmatch(state), state}
+    end
+  end
+
+  defp become_post_merge_latter(%__MODULE__{range_end: r_end} = state, cmds) do
+    %__MODULE__{state |
+      status:           {:post_merge_latter, cmds},
+      range_start:      r_end,
+      keys_former_half: %{}, # relinquish all keys
+      keys_latter_half: %{},
+      size_former_half: 0,
+      size_latter_half: 0
+    }
+  end
+
+  defp merge_shift_range_end(%__MODULE__{status:    status,
+                                         range_end: r_end} = state,
+                             latter_range_start,
+                             cmds) do
+    case status do
+      {:pre_merge_former, next_range_data}    -> {:ok, shift_range_and_apply_commands(state, next_range_data, cmds)}
+      :normal when latter_range_start < r_end -> {:ok, state}
+      _                                       -> {error_status_unmatch(state), state}
+    end
+  end
+
+  defp shift_range_and_apply_commands(%__MODULE__{keyspace_name:    ks_name,
+                                                  range_start:      r_start,
+                                                  range_end:        r_end,
+                                                  keys_former_half: keys1,
+                                                  keys_latter_half: keys2,
+                                                  size_former_half: size1,
+                                                  size_latter_half: size2} = state1,
+                                      %{range_end:        next_r_end,
+                                        keys_former_half: keys3,
+                                        keys_latter_half: keys4,
+                                        size_former_half: size3,
+                                        size_latter_half: size4},
+                                      cmds) do
+    {new_r_middle, keys_former, size_former, keys_latter, size_latter} =
+      merge_keys_maps(ks_name, r_start, r_end, next_r_end, keys1, keys2, keys3, keys4, size1, size2, size3, size4)
+    state2 = %__MODULE__{state1 |
+      status:           :normal,
+      range_middle:     new_r_middle,
+      range_end:        next_r_end,
+      keys_former_half: keys_former,
+      keys_latter_half: keys_latter,
+      size_former_half: size_former,
+      size_latter_half: size_latter,
+    }
+    Enum.reduce(cmds, state2, fn({key, arg}, s1) ->
+      {_ret, s2} = command_impl(s1, key, arg)
+      s2
+    end)
+  end
+
+  defp merge_keys_maps(ks_name,
+                       r_start, r_end, next_r_end,
+                       keys1, keys2, keys3, keys4,
+                       size1, size2, size3, size4) do
+    case div(r_start + next_r_end, 2) do
+      ^r_end ->
+        # the 2 ranges have the same value of `r_end - r_start`
+        {r_end, Map.merge(keys1, keys2), size1 + size2, Map.merge(keys3, keys4), size3 + size4}
+      new_r_middle when new_r_middle < r_end ->
+        # All keys in `keys1` belong to the former half of the newly-merged range.
+        # All keys in `keys3` and `keys4` belong to the latter half of the newly-merged range.
+        # We have to inspect each key in `keys2`.
+        divide_keys_map(ks_name, new_r_middle, keys1, size1, keys2, Map.merge(keys3, keys4), size3 + size4)
+      new_r_middle ->
+        # All keys in `keys1` and `keys2` belong to the former half of the newly-merged range.
+        # All keys in `keys4` belong to the latter half of the newly-merged range.
+        # We have to inspect each key in `keys3`.
+        divide_keys_map(ks_name, new_r_middle, Map.merge(keys1, keys2), size1 + size2, keys3, keys4, size4)
+    end
+  end
+
+  defp divide_keys_map(ks_name, r_middle, keys_former, size_former, keys_to_divide, keys_latter, size_latter) do
+    {keys1, size1, keys2, size2} =
+      Enum.reduce(keys_to_divide, {keys_former, size_former, keys_latter, size_latter}, fn({k, {_data, s} = pair}, {m1, s1, m2, s2}) ->
+        case Hash.from_key(ks_name, k) do
+          h when h < r_middle -> {Map.put(m1, k, pair), s1 + s, m2                  , s2    }
+          _                   -> {m1                  , s1    , Map.put(m2, k, pair), s2 + s}
+        end
+      end)
+    {r_middle, keys1, size1, keys2, size2}
+  end
+
+  #
+  # query
+  #
+  @impl true
+  defun query(state0 :: v[:uninitialized | t], arg :: RVData.query_arg) :: RVData.query_ret do
+    case state0 do
+      :uninitialized -> {:error, :uninitialized}
+      state          ->
+        case arg do
+          {:q, key, query_arg} -> query_impl(state, key, query_arg)
+          :get_total_size      -> get_total_size(state)
+          _                    -> :ok
+        end
+    end
+  end
+
+  defp query_impl(%__MODULE__{data_module: d, keys_former_half: keys_former, keys_latter_half: keys_latter} = state, key, query_arg) do
+    case check_key_position(state, key) do
+      {:error, _} = e -> e
+      :former         -> run_query(d, keys_former, key, query_arg)
+      :latter         -> run_query(d, keys_latter, key, query_arg)
+    end
+  end
+
+  defp run_query(d, keys, key, query_arg) do
+    case Map.get(keys, key) do
+      nil          -> {:error, :key_not_found}
+      {data, size} ->
+        {ret, load} = d.query(data, size, key, query_arg)
+        {:ok, ret, load}
+    end
+  end
+
+  defp get_total_size(%__MODULE__{status:           status,
+                                  keys_former_half: keys_former,
+                                  keys_latter_half: keys_latter,
+                                  size_former_half: s1,
+                                  size_latter_half: s2}) do
+    case status do
+      {:post_merge_latter, _} -> {:error, :post_merge_latter}
+      _                       -> {:ok, map_size(keys_former) + map_size(keys_latter), s1 + s2}
+    end
+  end
+
+  #
+  # hook
+  #
+  defmodule Hook do
+    alias RaftedValue.Data, as: RVData
+    alias RaftKV.{Range, LoadAccumulator}
+
+    @behaviour RaftedValue.LeaderHook
+
+    defun on_command_committed(data_before :: v[:uninitialized | Range.t],
+                               command_arg :: RVData.command_arg,
+                               command_ret :: RVData.command_ret,
+                               data_after  :: v[:uninitialized | Range.t]) :: any do
+      case {command_arg, command_ret} do
+        {{:c, key, arg}, {:ok, ret, load}} ->
+          report_load(data_after, load)
+          run_on_command_hook(data_before, key, arg, ret, data_after)
+        _ ->
+          :ok
+      end
+    end
+
+    defp run_on_command_hook(%Range{keys_former_half: keys1, keys_latter_half: keys2},
+                             key,
+                             arg,
+                             ret,
+                             %Range{keyspace_name: ks_name, hook_module: h, range_middle: r_middle, keys_former_half: keys3, keys_latter_half: keys4}) do
+      case h do
+        nil -> :ok
+        _   ->
+          {keys_before, keys_after} =
+            case Hash.from_key(ks_name, key) do
+              h when h < r_middle -> {keys1, keys3}
+              _                   -> {keys2, keys4}
+            end
+          {data_before, size_before} = Map.get(keys_before, key, {nil, 0})
+          {data_after , size_after } = Map.get(keys_after , key, {nil, 0})
+          h.on_command_committed(data_before, size_before, key, arg, ret, data_after, size_after)
+      end
+    end
+
+    defun on_query_answered(data      :: v[:uninitialized | Range.t],
+                            query_arg :: RVData.query_arg,
+                            query_ret :: RVData.query_ret) :: any do
+      case query_arg do
+        {:q, key, arg} ->
+          case query_ret do
+            {:ok, ret, load}         -> report_load(data, load); run_on_query_hook(data, key, arg, ret)
+            {:error, :key_not_found} -> report_load(data, :key_not_found)
+            _                        -> :ok
+          end
+        _ -> :ok
+      end
+    end
+
+    defp run_on_query_hook(%Range{hook_module: h, keys_former_half: keys1, keys_latter_half: keys2}, key, arg, ret) do
+      case h do
+        nil -> :ok
+        _   ->
+          {data, size} = Map.get(keys1, key) || Map.get(keys2, key)
+          h.on_query_answered(data, size, key, arg, ret)
+      end
+    end
+
+    defun on_follower_added(_data :: :uninitialized | Range.t, _pid :: pid) :: any do
+      :ok
+    end
+
+    defun on_follower_removed(_data :: :uninitialized | Range.t, _pid :: pid) :: any do
+      :ok
+    end
+
+    defun on_elected(_data :: :uninitialized | Range.t) :: any do
+      :ok
+    end
+
+    defun on_restored_from_files(_data :: :uninitialized | Range.t) :: any do
+      :ok
+    end
+
+    defp report_load(_range, 0) do
+      :ok
+    end
+    defp report_load(%Range{keyspace_name: ks_name, range_start: range_start}, load) do
+      LoadAccumulator.send_load(ks_name, range_start, load)
+    end
+  end
+
+  #
+  # API
+  #
+  defun consensus_group_name(keyspace_name :: v[atom], range_start :: v[non_neg_integer]) :: atom do
+    :"#{keyspace_name}_#{range_start}" # inevitable dynamic atom creation
+  end
+
+  defun initialize_1st_range(keyspace_name :: v[atom],
+                             data_module   :: v[module],
+                             hook_module   :: v[nil | module],
+                             range_start   :: v[non_neg_integer],
+                             range_end     :: v[pos_integer]) :: :ok | {:error, :already_initialized} do
+    cg_name = consensus_group_name(keyspace_name, range_start)
+    {:ok, r} = RaftFleet.command(cg_name, {:init_1st, keyspace_name, data_module, hook_module, range_start, range_end})
+    r
+  end
+end
