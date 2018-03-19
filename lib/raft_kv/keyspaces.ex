@@ -2,10 +2,7 @@ use Croma
 
 defmodule RaftKV.Keyspaces do
   alias RaftedValue.Data, as: RVData
-  alias RaftKV.{Hash, KeyspaceInfo, SplitMergePolicy, Workflow, EtsRecordManager}
-
-  @workflow_locked_for                       10_000
-  @range_ineligible_after_split_or_merge_for 2_000
+  alias RaftKV.{Hash, KeyspaceInfo, SplitMergePolicy, Workflow, EtsRecordManager, Config}
 
   defmodule KeyspaceMap do
     use Croma.SubtypeOfMap, key_module: Croma.Atom, value_module: RaftKV.KeyspaceInfo
@@ -84,7 +81,7 @@ defmodule RaftKV.Keyspaces do
       {:deregister, ks_name}          -> deregister_keyspace(state, ks_name)
       {:set_policy, ks_name, policy}  -> set_keyspace_policy(state, ks_name, policy)
       {:stats, stats_map, t}          -> {:ok, store_stats(state, stats_map, t)}
-      {:workflow_fetch, n, t}         -> workflow_fetch(state, n, t)
+      {:workflow_fetch, n, t, l}      -> workflow_fetch(state, n, t, l)
       {:workflow_proceed, pair, n, t} -> workflow_proceed(state, pair, n, t)
       {:workflow_abort, pair}         -> {:ok, workflow_abort(state, pair)}
       _                               -> {:ok, state}
@@ -145,8 +142,7 @@ defmodule RaftKV.Keyspaces do
                                split_candidates: split_candidates,
                                merge_candidates: merge_candidates} = state,
                    stats_map,
-                   time) do
-    threshold_time = time - @range_ineligible_after_split_or_merge_for
+                   threshold_time) do
     {new_keyspaces, new_split_candidates, new_merge_candidates} =
       Enum.reduce(keyspaces, {%{}, [], []}, fn({ks_name, ks_info}, {m, scs1, mcs1}) ->
         {new_ks_info, scs2, mcs2} =
@@ -165,23 +161,17 @@ defmodule RaftKV.Keyspaces do
     }
   end
 
-  defp workflow_fetch(%__MODULE__{ongoing_workflow: ongoing} = state, node, time) do
+  defp workflow_fetch(%__MODULE__{ongoing_workflow: ongoing} = state, node, time, lock_period) do
     case ongoing do
-      nil ->
-        case find_next_workflow(state, node, time) do
-          nil               -> {nil, state}
-          {task, new_state} -> {task, new_state}
-        end
-      {_task, n, t} when n != node and time < t + @workflow_locked_for ->
-        {:locked, state}
-      {task, _n, _t} ->
-        {task, %__MODULE__{state | ongoing_workflow: {task, node, time}}}
+      nil                                                       -> find_next_workflow(state, node, time)
+      {_task, n , t } when n != node and time < t + lock_period -> {:locked, state}
+      {task , _n, _t}                                           -> {task, %__MODULE__{state | ongoing_workflow: {task, node, time}}}
     end
   end
 
   defp find_next_workflow(state1, node, time) do
     case find_next_deregistration(state1) || find_next_range_split(state1) || find_next_range_merge(state1) do
-      nil            -> nil
+      nil            -> {nil, state1}
       {pair, state2} -> {pair, %__MODULE__{state2 | ongoing_workflow: {pair, node, time}}}
     end
   end
@@ -360,7 +350,8 @@ defmodule RaftKV.Keyspaces do
                      load_map :: %{atom => %{Hash.t => non_neg_integer}}) :: :ok do
     merged_map = merge_maps(size_map, load_map)
     if not Enum.empty?(merged_map) do
-      {:ok, _} = RaftFleet.command(__MODULE__, {:stats, merged_map, System.system_time(:milliseconds)})
+      threshold_time = System.system_time(:milliseconds) - Config.range_lock_period_after_split_or_merge()
+      {:ok, _} = RaftFleet.command(__MODULE__, {:stats, merged_map, threshold_time})
     end
     :ok
   end
@@ -380,7 +371,9 @@ defmodule RaftKV.Keyspaces do
   end
 
   defun workflow_fetch_from_local_leader() :: v[nil | Workflow.t] do
-    case RaftedValue.command(__MODULE__, {:workflow_fetch, Node.self(), System.system_time(:milliseconds)}) do
+    now = System.system_time(:milliseconds)
+    lock_period = Config.workflow_lock_period()
+    case RaftedValue.command(__MODULE__, {:workflow_fetch, Node.self(), now, lock_period}) do
       {:ok, :locked}                  -> nil
       {:ok, w}                        -> w
       {:error, _not_leader_or_noproc} -> nil

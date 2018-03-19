@@ -2,14 +2,11 @@ use Croma
 
 defmodule RaftKV do
   @moduledoc """
-  Documentation for RaftKV.
+  Documentation for `RaftKV`.
   """
 
   alias Croma.Result, as: R
-  alias RaftKV.{Hash, Table, Keyspaces, Range, SplitMergePolicy, ValuePerKey, EtsRecordManager}
-
-  @sleep_time_before_retry 100
-  @max_retries             3
+  alias RaftKV.{Hash, Table, Keyspaces, Range, SplitMergePolicy, ValuePerKey, EtsRecordManager, Config}
 
   @doc """
   """
@@ -112,10 +109,10 @@ defmodule RaftKV do
             call_impl(keyspace_name, key, f)
           {:error, :will_own_the_key_retry_afterward} ->
             # The range has not yet shift its range; retry after a sleep
-            if attempts >= @max_retries do
+            if attempts >= Config.max_retries() do
               {:error, {:timeout_waiting_for_completion_of_split_or_merge, cg_name}}
             else
-              :timer.sleep(@sleep_time_before_retry)
+              :timer.sleep(Config.sleep_duration_before_retry)
               call_impl(keyspace_name, key, f, attempts + 1)
             end
           {:error, :key_not_found} = e ->
