@@ -94,12 +94,12 @@ defmodule RaftKV do
     range_start = Table.lookup(keyspace_name, key)
     cg_name = Range.consensus_group_name(keyspace_name, range_start)
     case f.(cg_name) do
-      {:error, _} = e -> e
+      {:error, _reason} = e -> e
       {:ok, result}   ->
         case result do
           {:ok, ret, _load} ->
             {:ok, ret}
-          {:error, {:below_range, _}} ->
+          {:error, {:below_range, _range_start}} ->
             # The range should have already been merged; the marker in ETS is already stale.
             Table.delete(keyspace_name, range_start)
             call_impl(keyspace_name, key, f)

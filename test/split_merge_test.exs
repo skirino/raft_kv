@@ -16,16 +16,11 @@ defmodule RaftKV.SplitTest do
       :ok                     -> :timer.sleep(100)
       {:error, :not_inactive} -> :ok
     end
-  end
-
-  setup do
     :ok = RaftKV.add_1st_consensus_group(@ks_name, [])
     :ok = Range.initialize_1st_range(@ks_name, KV, nil, 0, Hash.upper_bound())
     :ok = SplitRange.create_consensus_group(@ks_name, 0, @split_position)
-
     groups = RaftFleet.consensus_groups() |> Map.keys() |> Enum.sort()
     assert groups == [@cg_former, @cg_latter]
-
     on_exit(fn ->
       Enum.each(groups, &RaftFleet.remove_consensus_group/1)
       kill_member(@cg_former)

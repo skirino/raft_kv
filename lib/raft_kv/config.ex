@@ -3,9 +3,9 @@ use Croma
 defmodule RaftKV.Config do
   @default_max_retries                            3
   @default_sleep_duration_before_retry            100
-  @default_stats_collection_interval              (if Mix.env() == :test, do:  5_000, else: 60_000)
-  @default_workflow_execution_interval            (if Mix.env() == :test, do:  5_000, else: 60_000)
-  @default_workflow_lock_period                   (if Mix.env() == :test, do: 10_000, else: 30_000)
+  @default_stats_collection_interval              (if Mix.env() == :test, do: 2_000, else: 60_000)
+  @default_workflow_execution_interval            (if Mix.env() == :test, do: 2_000, else: 60_000)
+  @default_workflow_lock_period                   (if Mix.env() == :test, do: 2_000, else: 30_000)
   @default_range_lock_period_after_split_or_merge @default_stats_collection_interval
 
   @moduledoc """

@@ -277,6 +277,9 @@ defmodule RaftKV.Workflow do
     end
 
     defp remove_consensus_group(ks_name, latter_range_start) do
+      # Wait until all clients, that had fetched the stale ETS record of `latter_range_start`
+      # before completion of `:remove_ets_record_in_all_nodes` step, finish interacting with the "latter" consensus group.
+      :timer.sleep(5_000)
       cg_name = Range.consensus_group_name(ks_name, latter_range_start)
       case RaftFleet.remove_consensus_group(cg_name) do
         :ok                  -> :ok

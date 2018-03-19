@@ -16,7 +16,7 @@ defmodule RaftKV.Table do
   end
 
   defun delete(ks_name :: v[atom], range_start :: v[Hash.t]) :: :ok do
-    :ets.delete(@table, {{ks_name, range_start}})
+    :ets.delete(@table, {ks_name, range_start})
     :ok
   end
 
