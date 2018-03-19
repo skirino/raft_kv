@@ -1,0 +1,7 @@
+language: elixir
+elixir:
+  - 1.6.4
+otp_release:
+  - 19.3.6
+  - 20.2.4
+script: "epmd -daemon && MIX_ENV=test mix do deps.get, coveralls.travis"
