@@ -6,7 +6,7 @@ defmodule RaftKV.SplitTest do
   # In this test we want to test `SplitRange.transfer_latter_half/3` and `MergeRanges.transfer_latter_half/3` in isolation,
   # and thus we don't call `RaftKV.init/0` (i.e., `Keyspaces` consensus group is not ready).
 
-  @ks_name        :kv
+  @ks_name        :kv2
   @split_position div(Hash.upper_bound(), 2)
   @cg_former      :"#{@ks_name}_0"
   @cg_latter      :"#{@ks_name}_#{@split_position}"

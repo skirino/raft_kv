@@ -38,6 +38,22 @@ defmodule RaftKVTest do
     end
   end
 
+  defp wait_until_all_consensus_groups_removed(tries \\ 0) do
+    if tries > 10 do
+      raise "timeout in waiting for removal of consensus groups for #{@ks_name}!"
+    end
+    RaftFleet.consensus_groups()
+    |> Enum.filter(fn {g, _} ->
+      Atom.to_string(g) |> String.starts_with?("#{@ks_name}_")
+    end)
+    |> case do
+      []         -> :ok
+      _non_empty ->
+        :timer.sleep(1000)
+        wait_until_all_consensus_groups_removed(tries + 1)
+    end
+  end
+
   setup_all do
     case RaftFleet.activate("zone") do
       :ok                     -> :timer.sleep(100)
@@ -49,7 +65,7 @@ defmodule RaftKVTest do
     :ok
   end
 
-  test "split/merge ranges in a keyspace" do
+  test "split/merge ranges in a keyspace while handling client queries/commands" do
     :ok = RaftKV.register_keyspace(@ks_name, [], KV, Hook, @policy1)
     assert RaftKV.list_keyspaces() == [@ks_name]
     assert RaftKV.register_keyspace(@ks_name, [], KV, Hook, @policy1) == {:error, :already_registered}
@@ -78,5 +94,6 @@ defmodule RaftKVTest do
     :ok = RaftKV.deregister_keyspace(@ks_name)
     assert RaftKV.list_keyspaces() == []
     assert RaftKV.deregister_keyspace(@ks_name) == {:error, :no_such_keyspace}
+    wait_until_all_consensus_groups_removed()
   end
 end
