@@ -56,6 +56,7 @@ defmodule RaftKVTest do
 
     Enum.each(0 .. (@n_keys - 1), fn i -> KV.set("#{i}", "#{i}") end)
     assert consensus_group_names() |> length() == 1
+
     with_clients(fn ->
       assert RaftKV.get_keyspace_policy(@ks_name) == @policy1
       :ok = RaftKV.set_keyspace_policy(@ks_name, @policy2)
@@ -67,6 +68,11 @@ defmodule RaftKVTest do
       assert RaftKV.get_keyspace_policy(@ks_name) == @policy1
       :timer.sleep(30_000)
       assert consensus_group_names() |> length() == 4
+    end)
+
+    Enum.each(0 .. (@n_keys - 1), fn i ->
+      :ok = KV.unset("#{i}")
+      assert KV.get("#{i}") == nil
     end)
 
     :ok = RaftKV.deregister_keyspace(@ks_name)
