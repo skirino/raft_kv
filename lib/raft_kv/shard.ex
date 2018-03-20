@@ -1,28 +1,28 @@
 use Croma
 
-defmodule RaftKV.Range do
+defmodule RaftKV.Shard do
   alias RaftedValue.Data, as: RVData
   alias RaftKV.Hash
 
   defmodule Status do
-    # This represents state machine state of each range in the context of splitting/merging protocol.
+    # This represents state machine state of each shard in the context of splitting/merging protocol.
     #
     # Statuses:
-    # - Right after creation, consensus group state is `:uninitialized` instead of a `Range.t`.
+    # - Right after creation, consensus group state is `:uninitialized` instead of a `Shard.t`.
     #   `:uninitialized` consensus group soon becomes either
-    #   `:normal` (if it's the 1st range) or `:pre_split_latter` (if it's created for a range split)
+    #   `:normal` (if it's the 1st shard) or `:pre_split_latter` (if it's created for a shard split)
     # - `:pre_split_former` and `:pre_merge_latter` are the sender side of data;
     #   they must remember all commands that have been applied to data to be transferred.
     # - `:post_split_former` and `:post_merge_latter` don't add new commands but they should keep commands
     #   that had been accumulated during `:pre_split_former` and `:pre_merge_latter`, respectively, in order to facilitate retrying.
     #     - In the case of `:post_split_former` those commands are discarded once it becomes `:normal` (i.e., on completion of splitting).
-    #     - A range (consensus group) in `:post_merge_latter` is simply to be removed.
+    #     - A shard (consensus group) in `:post_merge_latter` is simply to be removed.
     #
     # Client interactions:
     # - `:pre_split_latter` and `:post_merge_latter` return errors on receipt of commands/queries.
     #     - `:pre_split_latter` doesn't own any key range yet (will soon start to own the latter half).
     #     - `:post_merge_latter` no longer owns any key range.
-    #     - The error handling is implemented by adjusting `range_start` and `range_end` in `Range.t`, not by looking at `status`.
+    #     - The error handling is implemented by adjusting `range_start` and `range_end` in `Shard.t`, not by looking at `status`.
     # - `:pre_split_latter` and `:pre_merge_former` are the receiver side of data;
     #   on receipt of commands/queries, they return errors that indicate
     #   "I'm not yet allowed to handle your command/query but will soon become the owner of the key. Please retry!".
@@ -459,14 +459,14 @@ defmodule RaftKV.Range do
   #
   defmodule Hook do
     alias RaftedValue.Data, as: RVData
-    alias RaftKV.{Range, LoadAccumulator}
+    alias RaftKV.{Shard, LoadAccumulator}
 
     @behaviour RaftedValue.LeaderHook
 
-    defun on_command_committed(data_before :: v[:uninitialized | Range.t],
+    defun on_command_committed(data_before :: v[:uninitialized | Shard.t],
                                command_arg :: RVData.command_arg,
                                command_ret :: RVData.command_ret,
-                               data_after  :: v[:uninitialized | Range.t]) :: any do
+                               data_after  :: v[:uninitialized | Shard.t]) :: any do
       case {command_arg, command_ret} do
         {{:c, key, arg}, {:ok, ret, load}} ->
           report_load(data_after, load)
@@ -476,11 +476,11 @@ defmodule RaftKV.Range do
       end
     end
 
-    defp run_on_command_hook(%Range{keys_former_half: keys1, keys_latter_half: keys2},
+    defp run_on_command_hook(%Shard{keys_former_half: keys1, keys_latter_half: keys2},
                              key,
                              arg,
                              ret,
-                             %Range{keyspace_name: ks_name, hook_module: h, range_middle: r_middle, keys_former_half: keys3, keys_latter_half: keys4}) do
+                             %Shard{keyspace_name: ks_name, hook_module: h, range_middle: r_middle, keys_former_half: keys3, keys_latter_half: keys4}) do
       case h do
         nil -> :ok
         _   ->
@@ -495,7 +495,7 @@ defmodule RaftKV.Range do
       end
     end
 
-    defun on_query_answered(data      :: v[:uninitialized | Range.t],
+    defun on_query_answered(data      :: v[:uninitialized | Shard.t],
                             query_arg :: RVData.query_arg,
                             query_ret :: RVData.query_ret) :: any do
       case query_arg do
@@ -509,7 +509,7 @@ defmodule RaftKV.Range do
       end
     end
 
-    defp run_on_query_hook(%Range{hook_module: h, keys_former_half: keys1, keys_latter_half: keys2}, key, arg, ret) do
+    defp run_on_query_hook(%Shard{hook_module: h, keys_former_half: keys1, keys_latter_half: keys2}, key, arg, ret) do
       case h do
         nil -> :ok
         _   ->
@@ -518,26 +518,26 @@ defmodule RaftKV.Range do
       end
     end
 
-    defun on_follower_added(_data :: :uninitialized | Range.t, _pid :: pid) :: any do
+    defun on_follower_added(_data :: :uninitialized | Shard.t, _pid :: pid) :: any do
       :ok
     end
 
-    defun on_follower_removed(_data :: :uninitialized | Range.t, _pid :: pid) :: any do
+    defun on_follower_removed(_data :: :uninitialized | Shard.t, _pid :: pid) :: any do
       :ok
     end
 
-    defun on_elected(_data :: :uninitialized | Range.t) :: any do
+    defun on_elected(_data :: :uninitialized | Shard.t) :: any do
       :ok
     end
 
-    defun on_restored_from_files(_data :: :uninitialized | Range.t) :: any do
+    defun on_restored_from_files(_data :: :uninitialized | Shard.t) :: any do
       :ok
     end
 
     defp report_load(_range, 0) do
       :ok
     end
-    defp report_load(%Range{keyspace_name: ks_name, range_start: range_start}, load) do
+    defp report_load(%Shard{keyspace_name: ks_name, range_start: range_start}, load) do
       LoadAccumulator.send_load(ks_name, range_start, load)
     end
   end
@@ -549,7 +549,7 @@ defmodule RaftKV.Range do
     :"#{keyspace_name}_#{range_start}" # inevitable dynamic atom creation
   end
 
-  defun initialize_1st_range(keyspace_name :: v[atom],
+  defun initialize_1st_shard(keyspace_name :: v[atom],
                              data_module   :: v[module],
                              hook_module   :: v[nil | module],
                              range_start   :: v[non_neg_integer],

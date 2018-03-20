@@ -4,11 +4,11 @@ defmodule RaftKVTest do
 
   @n_keys 1000
   @ks_name :kv
-  @policy1 %RaftKV.SplitMergePolicy{min_ranges:                    4,
-                                    max_ranges:                    8,
+  @policy1 %RaftKV.SplitMergePolicy{min_shards:                    4,
+                                    max_shards:                    8,
                                     merge_threshold_ratio:         0.5,
                                     load_per_query_to_missing_key: 1}
-  @policy2 Map.put(@policy1, :max_size_per_range, 50)
+  @policy2 Map.put(@policy1, :max_size_per_shard, 50)
 
   defp with_clients(f) do
     pids = Enum.map(0 .. (@n_keys - 1), fn i -> spawn_link(fn -> client_loop(i) end) end)
@@ -65,7 +65,7 @@ defmodule RaftKVTest do
     :ok
   end
 
-  test "split/merge ranges in a keyspace while handling client queries/commands" do
+  test "split/merge shards in a keyspace while handling client queries/commands" do
     :ok = RaftKV.register_keyspace(@ks_name, [], KV, Hook, @policy1)
     assert RaftKV.list_keyspaces() == [@ks_name]
     assert RaftKV.register_keyspace(@ks_name, [], KV, Hook, @policy1) == {:error, :already_registered}

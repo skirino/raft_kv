@@ -170,7 +170,7 @@ defmodule RaftKV.Keyspaces do
   end
 
   defp find_next_workflow(state1, node, time) do
-    case find_next_deregistration(state1) || find_next_range_split(state1) || find_next_range_merge(state1) do
+    case find_next_deregistration(state1) || find_next_shard_split(state1) || find_next_shard_merge(state1) do
       nil            -> {nil, state1}
       {pair, state2} -> {pair, %__MODULE__{state2 | ongoing_workflow: {pair, node, time}}}
     end
@@ -186,7 +186,7 @@ defmodule RaftKV.Keyspaces do
     end
   end
 
-  defp find_next_range_split(%__MODULE__{keyspaces: keyspaces, split_candidates: split_candidates} = state1) do
+  defp find_next_shard_split(%__MODULE__{keyspaces: keyspaces, split_candidates: split_candidates} = state1) do
     case split_candidates do
       [] ->
         nil
@@ -194,28 +194,28 @@ defmodule RaftKV.Keyspaces do
         state2 = %__MODULE__{state1 | split_candidates: scs}
         with {:ok, ks_info1}                  <- Map.fetch(keyspaces, ks_name),
              {:ok, ks_info2, new_range_start} <- KeyspaceInfo.check_if_splittable(ks_info1, range_start) do
-          pair = {Workflow.SplitRange, Workflow.SplitRange.first(ks_name, range_start, new_range_start)}
+          pair = {Workflow.SplitShard, Workflow.SplitShard.first(ks_name, range_start, new_range_start)}
           state3 = %__MODULE__{state2 | keyspaces: Map.put(keyspaces, ks_name, ks_info2)}
           {pair, state3}
         else
-          :error -> find_next_range_split(state2)
+          :error -> find_next_shard_split(state2)
         end
     end
   end
 
-  defp find_next_range_merge(%__MODULE__{keyspaces: keyspaces, merge_candidates: merge_candidates} = state) do
+  defp find_next_shard_merge(%__MODULE__{keyspaces: keyspaces, merge_candidates: merge_candidates} = state) do
     case merge_candidates do
       [] ->
         nil
       [{_usage_ratio, ks_name, range_start1, range_start2} | mcs] ->
         with {:ok, ks_info1} <- Map.fetch(keyspaces, ks_name),
              {:ok, ks_info2} <- KeyspaceInfo.check_if_mergeable(ks_info1, range_start1, range_start2) do
-          pair = {Workflow.MergeRanges, Workflow.MergeRanges.first(ks_name, range_start1, range_start2)}
+          pair = {Workflow.MergeShards, Workflow.MergeShards.first(ks_name, range_start1, range_start2)}
           new_mcs = MergeCandidates.remove_overlapping_entries(mcs, ks_name, range_start1, range_start2)
           new_state = %__MODULE__{state | keyspaces: Map.put(keyspaces, ks_name, ks_info2), merge_candidates: new_mcs}
           {pair, new_state}
         else
-          :error -> find_next_range_merge(%__MODULE__{state | merge_candidates: mcs})
+          :error -> find_next_shard_merge(%__MODULE__{state | merge_candidates: mcs})
         end
     end
   end
@@ -238,13 +238,13 @@ defmodule RaftKV.Keyspaces do
 
   defp modify_state_on_completion_of_workflow_step(%__MODULE__{keyspaces: keyspaces} = state, pair, time) do
     case pair do
-      {Workflow.SplitRange, {:create_consensus_group, ks_name, _range_start1, range_start2}} ->
-        new_keyspaces = Map.update!(keyspaces, ks_name, &KeyspaceInfo.add_range(&1, range_start2))
+      {Workflow.SplitShard, {:create_consensus_group, ks_name, _range_start1, range_start2}} ->
+        new_keyspaces = Map.update!(keyspaces, ks_name, &KeyspaceInfo.add_shard(&1, range_start2))
         %__MODULE__{state | keyspaces: new_keyspaces}
-      {Workflow.SplitRange, {:transfer_latter_half, ks_name, range_start1, range_start2}} ->
+      {Workflow.SplitShard, {:transfer_latter_half, ks_name, range_start1, range_start2}} ->
         new_keyspaces = Map.update!(keyspaces, ks_name, &KeyspaceInfo.touch_both(&1, range_start1, range_start2, time))
         %__MODULE__{state | keyspaces: new_keyspaces}
-      {Workflow.MergeRanges, {:transfer_latter_half, ks_name, range_start1, range_start2}} ->
+      {Workflow.MergeShards, {:transfer_latter_half, ks_name, range_start1, range_start2}} ->
         new_keyspaces = Map.update!(keyspaces, ks_name, &KeyspaceInfo.touch_and_delete(&1, range_start1, range_start2, time))
         %__MODULE__{state | keyspaces: new_keyspaces}
       _ ->
@@ -266,15 +266,15 @@ defmodule RaftKV.Keyspaces do
   defun query(%__MODULE__{keyspaces: keyspaces}, arg :: RVData.query_arg) :: RVData.query_ret do
     case arg do
       :keyspace_names        -> Map.keys(keyspaces)
-      :all_keyspace_ranges   -> all_keyspace_ranges(keyspaces)
+      :all_keyspace_shards   -> all_keyspace_shards(keyspaces)
       {:get_policy, ks_name} -> policy_of(keyspaces, ks_name)
       _                      -> :ok
     end
   end
 
-  defp all_keyspace_ranges(keyspaces) do
+  defp all_keyspace_shards(keyspaces) do
     Enum.map(keyspaces, fn {ks_name, ks_info} ->
-      {ks_name, KeyspaceInfo.range_start_positions(ks_info)}
+      {ks_name, KeyspaceInfo.shard_range_start_positions(ks_info)}
     end)
   end
 
@@ -350,7 +350,7 @@ defmodule RaftKV.Keyspaces do
                      load_map :: %{atom => %{Hash.t => non_neg_integer}}) :: :ok do
     merged_map = merge_maps(size_map, load_map)
     if not Enum.empty?(merged_map) do
-      threshold_time = System.system_time(:milliseconds) - Config.range_lock_period_after_split_or_merge()
+      threshold_time = System.system_time(:milliseconds) - Config.shard_lock_period_after_split_or_merge()
       {:ok, _} = RaftFleet.command(__MODULE__, {:stats, merged_map, threshold_time})
     end
     :ok

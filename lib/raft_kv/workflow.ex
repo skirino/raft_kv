@@ -1,7 +1,7 @@
 use Croma
 
 defmodule RaftKV.Workflow do
-  alias RaftKV.{Hash, Range, Keyspaces, EtsRecordManager}
+  alias RaftKV.{Hash, Shard, Keyspaces, EtsRecordManager}
 
   defmodule DeregisterKeyspace do
     # Deregistering a keyspace involves:
@@ -56,14 +56,14 @@ defmodule RaftKV.Workflow do
     end
   end
 
-  defmodule SplitRange do
-    # Spliting a range into two involves:
-    # (1) `WorkflowExecutor` polls from `Keyspaces` consensus group and find that a range needs to be split.
-    # (2) `WorkflowExecutor` creates new consensus group for the latter half of the target range and
+  defmodule SplitShard do
+    # Spliting a shard into two involves:
+    # (1) `WorkflowExecutor` polls from `Keyspaces` consensus group and find that a shard needs to be split.
+    # (2) `WorkflowExecutor` creates new consensus group for the latter half of the target shard and
     #     waits until the 3 members become up and running.
-    # (3) `WorkflowExecutor` takes data from original range, passes the data to the new range,
-    #     changes the original range to handle only former half and then tell the new range to handle client requests.
-    # (4) `WorkflowExecutor` confirms that all relevant nodes have added the ETS record for the new range.
+    # (3) `WorkflowExecutor` takes data from original shard, passes the data to the new shard,
+    #     changes the original shard to handle only former half and then tell the new shard to handle client requests.
+    # (4) `WorkflowExecutor` confirms that all relevant nodes have added the ETS record for the new shard.
     # (2), (3) and (4) are executed as a 3-step workflow.
 
     @type t :: {:create_consensus_group | :transfer_latter_half | :add_ets_record_in_all_nodes, atom, Hash.t, Hash.t}
@@ -85,7 +85,7 @@ defmodule RaftKV.Workflow do
     end
 
     defpt create_consensus_group(ks_name, former_range_start, latter_range_start) do
-      cg_name = Range.consensus_group_name(ks_name, latter_range_start)
+      cg_name = Shard.consensus_group_name(ks_name, latter_range_start)
       case RaftFleet.add_consensus_group(cg_name, 3, get_rv_config(ks_name, former_range_start)) do
         :ok                      -> :ok
         {:error, :already_added} -> :ok
@@ -94,7 +94,7 @@ defmodule RaftKV.Workflow do
     end
 
     defp get_rv_config(ks_name, former_range_start) do
-      former_cg_name = Range.consensus_group_name(ks_name, former_range_start)
+      former_cg_name = Shard.consensus_group_name(ks_name, former_range_start)
       leader = RaftFleet.whereis_leader(former_cg_name)
       %{config: rv_config} = RaftedValue.status(leader)
       rv_config
@@ -121,8 +121,8 @@ defmodule RaftKV.Workflow do
     end
 
     defpt transfer_latter_half(ks_name, former_range_start, latter_range_start, halt_at \\ 10) do
-      cg_former = Range.consensus_group_name(ks_name, former_range_start)
-      cg_latter = Range.consensus_group_name(ks_name, latter_range_start)
+      cg_former = Shard.consensus_group_name(ks_name, former_range_start)
+      cg_latter = Shard.consensus_group_name(ks_name, latter_range_start)
       case prepare_former(cg_former, former_range_start, latter_range_start) do
         {:ok, data}      -> transfer_latter_half_impl1(cg_former, cg_latter, latter_range_start, data, halt_at)
         {:skip, cmds}    -> transfer_latter_half_impl2(cg_former, cg_latter, latter_range_start, cmds, halt_at)
@@ -155,7 +155,7 @@ defmodule RaftKV.Workflow do
         {:error, {:status_unmatch, label, r_start, r_end}} ->
           case {label, r_start, r_end} do
             {:normal, ^former_range_start, ^latter_range_start} -> :skip_all # Already split, nothing to do.
-            _                                                   -> {:abort, "range #{cg_former} can't be split due to status unmatch: #{label}, #{r_start}-#{r_end}"}
+            _                                                   -> {:abort, "shard #{cg_former} can't be split due to status unmatch: #{label}, #{r_start}-#{r_end}"}
           end
       end
     end
@@ -174,7 +174,7 @@ defmodule RaftKV.Workflow do
       {:ok, r} = RaftFleet.command(cg_former, {:split_shift_range_end, latter_range_start})
       case r do
         {:ok, cmds}                                        -> {:ok, cmds}
-        {:error, {:status_unmatch, label, r_start, r_end}} -> {:abort, "range #{cg_former} can't shift range_end due to status unmatch: #{label}, #{r_start}-#{r_end}"}
+        {:error, {:status_unmatch, label, r_start, r_end}} -> {:abort, "shard #{cg_former} can't shift range_end due to status unmatch: #{label}, #{r_start}-#{r_end}"}
       end
     end
 
@@ -185,7 +185,7 @@ defmodule RaftKV.Workflow do
       case r do
         :ok                                                               -> :ok
         {:error, {:status_unmatch, :normal, ^latter_range_start, _r_end}} -> :ok # Already shifted, proceed
-        {:error, {:status_unmatch, label, r_start, r_end}}                -> {:abort, "range #{cg_latter} can't shift range_start due to status unmatch: #{label}, #{r_start}-#{r_end}"}
+        {:error, {:status_unmatch, label, r_start, r_end}}                -> {:abort, "shard #{cg_latter} can't shift range_start due to status unmatch: #{label}, #{r_start}-#{r_end}"}
       end
     end
 
@@ -196,13 +196,13 @@ defmodule RaftKV.Workflow do
     end
   end
 
-  defmodule MergeRanges do
-    # Merging two consecutive ranges into one involves:
-    # (1) `WorkflowExecutor` polls from `Keyspaces` consensus group and find that two consecutive ranges need to be merged.
-    # (2) `WorkflowExecutor` takes data from the latter range, passes the data to the former range,
-    #     turns the latter range into inactive state and then tell the former range to handle both of the ranges.
-    # (3) `WorkflowExecutor` confirms that all relevant nodes have removed the ETS record for the latter range.
-    # (4) `WorkflowExecutor` removes the consensus group for the latter range.
+  defmodule MergeShards do
+    # Merging two consecutive shards into one involves:
+    # (1) `WorkflowExecutor` polls from `Keyspaces` consensus group and find that two consecutive shards need to be merged.
+    # (2) `WorkflowExecutor` takes data from the latter shard, passes the data to the former shard,
+    #     turns the latter shard into inactive state and then tell the former shard to handle both of the key ranges.
+    # (3) `WorkflowExecutor` confirms that all relevant nodes have removed the ETS record for the latter shard.
+    # (4) `WorkflowExecutor` removes the consensus group for the latter shard.
     # (2), (3) and (4) are executed as a 3-step workflow.
 
     @type t :: {:transfer_latter_half | :remove_ets_record_in_all_nodes | :remove_consensus_group, atom, Hash.t, Hash.t}
@@ -224,8 +224,8 @@ defmodule RaftKV.Workflow do
     end
 
     defpt transfer_latter_half(ks_name, former_range_start, latter_range_start, halt_at \\ 10) do
-      cg_former = Range.consensus_group_name(ks_name, former_range_start)
-      cg_latter = Range.consensus_group_name(ks_name, latter_range_start)
+      cg_former = Shard.consensus_group_name(ks_name, former_range_start)
+      cg_latter = Shard.consensus_group_name(ks_name, latter_range_start)
       case prepare_latter(cg_latter) do
         {:ok, data}      -> transfer_latter_half_impl(cg_former, cg_latter, latter_range_start, data, halt_at)
         {:skip, cmds}    -> shift_range_former(cg_former, latter_range_start, cmds, halt_at)
@@ -247,7 +247,7 @@ defmodule RaftKV.Workflow do
       case r do
         {:ok, data}                                        -> {:ok, data}
         {:error, {:range_already_shifted, cmds}}           -> {:skip, cmds}
-        {:error, {:status_unmatch, label, r_start, r_end}} -> {:abort, "range #{cg_latter} can't be merged due to status unmatch: #{label}, #{r_start}-#{r_end}"}
+        {:error, {:status_unmatch, label, r_start, r_end}} -> {:abort, "shard #{cg_latter} can't be merged due to status unmatch: #{label}, #{r_start}-#{r_end}"}
       end
     end
 
@@ -256,7 +256,7 @@ defmodule RaftKV.Workflow do
       {:ok, r} = RaftFleet.command(cg_former, {:merge_install, data})
       case r do
         :ok                                                -> :ok
-        {:error, {:status_unmatch, label, r_start, r_end}} -> {:abort, "range #{cg_former} cannot install data from successive range due to status unmatch: #{label}, #{r_start}-#{r_end}"}
+        {:error, {:status_unmatch, label, r_start, r_end}} -> {:abort, "shard #{cg_former} cannot install data from successive range due to status unmatch: #{label}, #{r_start}-#{r_end}"}
       end
     end
 
@@ -265,7 +265,7 @@ defmodule RaftKV.Workflow do
       {:ok, r} = RaftFleet.command(cg_latter, :merge_shift_range_start)
       case r do
         {:ok, cmds}                                        -> {:ok, cmds}
-        {:error, {:status_unmatch, label, r_start, r_end}} -> {:abort, "range #{cg_latter} can't shift range start due to status unmatch: #{label}, #{r_start}-#{r_end}"}
+        {:error, {:status_unmatch, label, r_start, r_end}} -> {:abort, "shard #{cg_latter} can't shift range start due to status unmatch: #{label}, #{r_start}-#{r_end}"}
       end
     end
 
@@ -280,7 +280,7 @@ defmodule RaftKV.Workflow do
       # Wait until all clients, that had fetched the stale ETS record of `latter_range_start`
       # before completion of `:remove_ets_record_in_all_nodes` step, finish interacting with the "latter" consensus group.
       :timer.sleep(5_000)
-      cg_name = Range.consensus_group_name(ks_name, latter_range_start)
+      cg_name = Shard.consensus_group_name(ks_name, latter_range_start)
       case RaftFleet.remove_consensus_group(cg_name) do
         :ok                  -> :ok
         {:error, :not_found} -> :ok
@@ -288,12 +288,12 @@ defmodule RaftKV.Workflow do
     end
   end
 
-  @type t :: {DeregisterKeyspace, DeregisterKeyspace.t} | {SplitRange, SplitRange.t} | {MergeRanges, MergeRanges.t}
+  @type t :: {DeregisterKeyspace, DeregisterKeyspace.t} | {SplitShard, SplitShard.t} | {MergeShards, MergeShards.t}
 
   defun valid?(t :: any) :: boolean do
     {DeregisterKeyspace, _} -> true
-    {SplitRange        , _} -> true
-    {MergeRanges       , _} -> true
+    {SplitShard        , _} -> true
+    {MergeShards       , _} -> true
     _                       -> false
   end
 

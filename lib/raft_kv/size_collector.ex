@@ -2,16 +2,16 @@ use Croma
 
 defmodule RaftKV.SizeCollector do
   use GenServer
-  alias RaftKV.{Hash, Table, Range}
+  alias RaftKV.{Hash, Table, Shard}
 
   defmodule Fetcher do
     def run() do
-      size_map = Table.traverse_all_keyspace_ranges(%{}, &collect_from_local_member/2)
+      size_map = Table.traverse_all_keyspace_shards(%{}, &collect_from_local_member/2)
       exit({:shutdown, size_map})
     end
 
     defp collect_from_local_member({ks_name, range_start}, acc) do
-      cg_name = Range.consensus_group_name(ks_name, range_start)
+      cg_name = Shard.consensus_group_name(ks_name, range_start)
       case RaftedValue.query(cg_name, :get_total_size) do
         {:ok, {:ok, n_keys, total_size}} ->
           submap = Map.get(acc, ks_name, %{}) |> Map.put(range_start, {n_keys, total_size})

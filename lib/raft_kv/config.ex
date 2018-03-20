@@ -6,7 +6,7 @@ defmodule RaftKV.Config do
   @default_stats_collection_interval              (if Mix.env() == :test, do: 2_000, else: 60_000)
   @default_workflow_execution_interval            (if Mix.env() == :test, do: 2_000, else: 60_000)
   @default_workflow_lock_period                   (if Mix.env() == :test, do: 2_000, else: 30_000)
-  @default_range_lock_period_after_split_or_merge @default_stats_collection_interval
+  @default_shard_lock_period_after_split_or_merge @default_stats_collection_interval
 
   @moduledoc """
   `RaftKV` defines the following application configs:
@@ -16,7 +16,7 @@ defmodule RaftKV.Config do
   - `:stats_collection_interval`
   - `:workflow_execution_interval`
   - `:workflow_lock_period`
-  - `:range_lock_period_after_split_or_merge`
+  - `:shard_lock_period_after_split_or_merge`
 
   Note that each `raft_kv` processes uses application configs stored in the local node.
   If you want to configure the options above you must set them on all nodes in your cluster.
@@ -47,7 +47,7 @@ defmodule RaftKV.Config do
     Application.get_env(:raft_kv, :workflow_lock_period, @default_workflow_lock_period)
   end
 
-  defun range_lock_period_after_split_or_merge() :: pos_integer do
-    Application.get_env(:raft_kv, :range_lock_period_after_split_or_merge, @default_range_lock_period_after_split_or_merge)
+  defun shard_lock_period_after_split_or_merge() :: pos_integer do
+    Application.get_env(:raft_kv, :shard_lock_period_after_split_or_merge, @default_shard_lock_period_after_split_or_merge)
   end
 end

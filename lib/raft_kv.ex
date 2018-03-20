@@ -6,7 +6,7 @@ defmodule RaftKV do
   """
 
   alias Croma.Result, as: R
-  alias RaftKV.{Hash, Table, Keyspaces, Range, SplitMergePolicy, ValuePerKey, EtsRecordManager, Config}
+  alias RaftKV.{Hash, Table, Keyspaces, Shard, SplitMergePolicy, ValuePerKey, EtsRecordManager, Config}
 
   @doc """
   """
@@ -14,7 +14,7 @@ defmodule RaftKV do
     case Keyspaces.add_consensus_group() do
       :ok                      -> :ok
       {:error, :already_added} ->
-        {:ok, kss} = RaftFleet.query(Keyspaces, :all_keyspace_ranges)
+        {:ok, kss} = RaftFleet.query(Keyspaces, :all_keyspace_shards)
         Enum.each(kss, fn {ks_name, range_starts} ->
           Enum.each(range_starts, &Table.insert(ks_name, &1))
         end)
@@ -31,7 +31,7 @@ defmodule RaftKV do
     with true <- SplitMergePolicy.valid?(policy),
          :ok  <- Keyspaces.register(keyspace_name, policy),
          :ok  <- add_1st_consensus_group(keyspace_name, rv_config_options),
-         :ok  <- Range.initialize_1st_range(keyspace_name, data_module, hook_module, 0, Hash.upper_bound()) do
+         :ok  <- Shard.initialize_1st_shard(keyspace_name, data_module, hook_module, 0, Hash.upper_bound()) do
       EtsRecordManager.ensure_record_created(keyspace_name, 0)
     else
       false                                                        -> {:error, :invalid_policy}
@@ -41,9 +41,9 @@ defmodule RaftKV do
 
   defpt add_1st_consensus_group(keyspace_name, rv_config_options) do
     rv_config =
-      RaftedValue.make_config(Range, rv_config_options)
-      |> Map.put(:leader_hook_module, Range.Hook)
-    RaftFleet.add_consensus_group(Range.consensus_group_name(keyspace_name, 0), 3, rv_config)
+      RaftedValue.make_config(Shard, rv_config_options)
+      |> Map.put(:leader_hook_module, Shard.Hook)
+    RaftFleet.add_consensus_group(Shard.consensus_group_name(keyspace_name, 0), 3, rv_config)
   end
 
   @doc """
@@ -92,23 +92,23 @@ defmodule RaftKV do
 
   defp call_impl(keyspace_name, key, f, attempts \\ 0) do
     range_start = Table.lookup(keyspace_name, key)
-    cg_name = Range.consensus_group_name(keyspace_name, range_start)
+    cg_name = Shard.consensus_group_name(keyspace_name, range_start)
     case f.(cg_name) do
       {:error, _reason} = e -> e
       {:ok, result}   ->
         case result do
           {:ok, ret, _load} ->
             {:ok, ret}
-          {:error, {:below_range, _range_start}} ->
-            # The range should have already been merged; the marker in ETS is already stale.
+          {:error, {:below_range, _start}} ->
+            # The shard should have already been merged; the marker in ETS is already stale.
             Table.delete(keyspace_name, range_start)
             call_impl(keyspace_name, key, f)
           {:error, {:above_range, range_end}} ->
-            # The range should have already been split; we have to make a new marker for the newly-created range.
+            # The shard should have already been split; we have to make a new marker for the newly-created shard.
             Table.insert(keyspace_name, range_end)
             call_impl(keyspace_name, key, f)
           {:error, :will_own_the_key_retry_afterward} ->
-            # The range has not yet shift its range; retry after a sleep
+            # The shard has not yet shift its range; retry after a sleep
             if attempts >= Config.max_retries() do
               {:error, {:timeout_waiting_for_completion_of_split_or_merge, cg_name}}
             else

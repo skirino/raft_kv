@@ -34,7 +34,7 @@ defmodule RaftKV.EtsRecordManager do
     Table.delete(ks_name, range_start)
   end
   defp handle({:delete_all, ks_name}) do
-    Table.traverse_keyspace_ranges(ks_name, [], &[&1 | &2])
+    Table.traverse_keyspace_shards(ks_name, [], &[&1 | &2])
     |> Enum.each(fn {^ks_name, range_start} -> Table.delete(ks_name, range_start) end)
   end
 
