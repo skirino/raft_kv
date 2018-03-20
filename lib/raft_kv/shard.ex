@@ -196,18 +196,21 @@ defmodule RaftKV.Shard do
                                        unquote(size_field) => total} = state,
                            key,
                            command_arg) do
-      {data, size} = Map.get(keys, key, {nil, 0})
-      {ret, load, new_size, new_data} = d.command(data, size, key, command_arg)
-      {new_keys, new_total} =
-        case new_data do
-          nil -> {Map.delete(keys, key)                   , total            - size}
-          _   -> {Map.put(keys, key, {new_data, new_size}), total + new_size - size}
-        end
+      {ret, load, new_keys, new_total} = apply_command_to_half(d, keys, total, key, command_arg)
       new_status = Status.remember_command(status, unquote(which), {key, command_arg})
       new_state = %__MODULE__{state | :status => new_status, unquote(keys_field) => new_keys, unquote(size_field) => new_total}
       {{:ok, ret, load}, new_state}
     end
   end)
+
+  defp apply_command_to_half(d, keys, total, key, command_arg) do
+    {data, size} = Map.get(keys, key, {nil, 0})
+    {ret, load, new_size, new_data} = d.command(data, size, key, command_arg)
+    case new_data do
+      nil -> {ret, load, Map.delete(keys, key)                   , total            - size}
+      _   -> {ret, load, Map.put(keys, key, {new_data, new_size}), total + new_size - size}
+    end
+  end
 
   #
   # split
