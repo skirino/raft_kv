@@ -94,7 +94,7 @@ defmodule RaftKVTest do
         assert RaftKV.get_keyspace_policy(@ks_name) == @policy1
         :ok = RaftKV.set_keyspace_policy(@ks_name, @policy2)
         assert RaftKV.get_keyspace_policy(@ks_name) == @policy2
-        :timer.sleep(25_000)
+        :timer.sleep(30_000)
         assert consensus_group_names() |> length() == 8
         assert get_all_keys() == keys
         :ok = RaftKV.set_keyspace_policy(@ks_name, @policy1)

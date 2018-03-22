@@ -350,7 +350,7 @@ defmodule RaftKV.Keyspaces do
                      load_map :: %{atom => %{Hash.t => non_neg_integer}}) :: :ok do
     merged_map = merge_maps(size_map, load_map)
     if not Enum.empty?(merged_map) do
-      threshold_time = System.system_time(:milliseconds) - Config.shard_lock_period_after_split_or_merge()
+      threshold_time = System.system_time(:milliseconds) - Config.shard_ineligible_period_after_split_or_merge()
       {:ok, _} = RaftFleet.command(__MODULE__, {:stats, merged_map, threshold_time})
     end
     :ok
