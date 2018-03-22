@@ -10,7 +10,7 @@ defmodule RaftKV.ValuePerKey do
   @type load        :: non_neg_integer
   @type size        :: non_neg_integer
 
-  @callback command(value, size, key, command_arg) :: {command_ret, load, size, nil | value}
+  @callback command(value, size, key, command_arg) :: {command_ret, load, nil | value, size}
   @callback query(value, size, key, query_arg) :: {query_ret, load}
 end
 
@@ -21,14 +21,14 @@ if Mix.env() in [:dev, :test] do
 
     @impl true
     def command(_previous_value, _size, _key, :unset) do
-      {:ok, 5, 0, nil}
+      {:ok, 5, nil, 0}
     end
     def command(_previous_value, _size, _key, {:set, value}) do
-      {:ok, 5, byte_size(value), value}
+      {:ok, 5, value, byte_size(value)}
     end
     def command(value, _size, _key, :append_zero) do
       new_value = value <> "0"
-      {:ok, 5, byte_size(new_value), new_value}
+      {:ok, 5, new_value, byte_size(new_value)}
     end
 
     @impl true

@@ -213,7 +213,7 @@ defmodule RaftKV.Shard do
 
   defp apply_command_to_half(d, keys, total, key, command_arg) do
     {data, size} = Map.get(keys, key, {nil, 0})
-    {ret, load, new_size, new_data} = d.command(data, size, key, command_arg)
+    {ret, load, new_data, new_size} = d.command(data, size, key, command_arg)
     case new_data do
       nil -> {ret, load, Map.delete(keys, key)                   , total            - size}
       _   -> {ret, load, Map.put(keys, key, {new_data, new_size}), total + new_size - size}
@@ -240,7 +240,7 @@ defmodule RaftKV.Shard do
 
   defp apply_all_keys_command_to_half(d, keys, command_arg) do
     Enum.reduce(keys, {0, %{}, 0}, fn({key, {data, size}}, {load_acc, map, size_acc}) ->
-      {_ret, load, new_size, new_data} = d.command(data, size, key, command_arg)
+      {_ret, load, new_data, new_size} = d.command(data, size, key, command_arg)
       case new_data do
         nil -> {load_acc + load, map                                    , size_acc           }
         _   -> {load_acc + load, Map.put(map, key, {new_data, new_size}), size_acc + new_size}
