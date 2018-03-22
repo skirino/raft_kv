@@ -11,7 +11,7 @@ defmodule RaftKV.MixProject do
       build_embedded:    Mix.env() == :prod,
       start_permanent:   Mix.env() == :prod,
       deps:              deps(),
-      description:       "",
+      description:       "An Elixir library to store key-value pairs in a distributed, fault-tolerant, self-adjusting data structure.",
       package:           package(),
       source_url:        @github_url,
       homepage_url:      @github_url,

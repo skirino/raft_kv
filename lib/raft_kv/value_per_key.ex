@@ -50,17 +50,17 @@ defmodule RaftKV.ValuePerKey do
   @callback query(value, size, key, query_arg) :: {query_ret, load}
 end
 
-if Mix.env() in [:dev, :test] do
+if Mix.env() == :test do
   defmodule KV do
     alias RaftKV.ValuePerKey
     @behaviour ValuePerKey
 
     @impl true
-    def command(_previous_value, _size, _key, :unset) do
-      {:ok, 5, nil, 0}
-    end
     def command(_previous_value, _size, _key, {:set, value}) do
       {:ok, 5, value, byte_size(value)}
+    end
+    def command(_previous_value, _size, _key, :unset) do
+      {:ok, 5, nil, 0}
     end
     def command(value, _size, _key, :append_zero) do
       new_value = value <> "0"

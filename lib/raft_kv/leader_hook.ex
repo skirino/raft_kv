@@ -30,7 +30,7 @@ defmodule RaftKV.LeaderHook do
                               ret   :: ValuePerKey.query_ret) :: any
 end
 
-if Mix.env() in [:dev, :test] do
+if Mix.env() == :test do
   defmodule Hook do
     @behaviour RaftKV.LeaderHook
 
