@@ -12,15 +12,12 @@ defmodule RaftKV.SplitMergeTest do
   @cg_latter      :"#{@ks_name}_#{@split_position}"
 
   setup_all do
-    case RaftFleet.activate("zone") do
-      :ok                     -> :timer.sleep(100)
-      {:error, :not_inactive} -> :ok
-    end
     :ok = RaftKV.add_1st_consensus_group(@ks_name, [])
     :ok = Shard.initialize_1st_shard(@ks_name, KV, nil, 0, Hash.upper_bound())
     :ok = SplitShard.create_consensus_group(@ks_name, 0, @split_position)
-    groups = RaftFleet.consensus_groups() |> Map.keys() |> Enum.sort()
-    assert groups == [@cg_former, @cg_latter]
+    groups = RaftFleet.consensus_groups() |> Map.keys() |> Enum.sort() # may contain `Keyspaces` depending on test execution order
+    assert @cg_former in groups
+    assert @cg_latter in groups
     on_exit(fn ->
       Enum.each(groups, &RaftFleet.remove_consensus_group/1)
       kill_member(@cg_former)

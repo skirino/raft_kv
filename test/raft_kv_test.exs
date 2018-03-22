@@ -73,10 +73,6 @@ defmodule RaftKVTest do
   end
 
   setup_all do
-    case RaftFleet.activate("zone") do
-      :ok                     -> :timer.sleep(100)
-      {:error, :not_inactive} -> :ok
-    end
     :ok = RaftKV.init()
     assert RaftKV.list_keyspaces() == []
     assert RaftFleet.consensus_groups() |> Map.keys() == [RaftKV.Keyspaces]
