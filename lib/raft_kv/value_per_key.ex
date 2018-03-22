@@ -26,6 +26,10 @@ if Mix.env() in [:dev, :test] do
     def command(_previous_value, _size, _key, {:set, value}) do
       {:ok, 5, byte_size(value), value}
     end
+    def command(value, _size, _key, :append_zero) do
+      new_value = value <> "0"
+      {:ok, 5, byte_size(new_value), new_value}
+    end
 
     @impl true
     def query(value, _size, _key, :get) do

@@ -120,4 +120,32 @@ defmodule RaftKV do
         end
     end
   end
+
+  #
+  # shard-aware API
+  #
+  @doc """
+  """
+  defun reduce_keyspace_shard_names(keyspace_name :: g[atom], acc :: a, f :: ((atom, a) -> a)) :: a when a: any do
+    Table.traverse_keyspace_shards(keyspace_name, acc, fn({_ks_name, range_start}, a) ->
+      cg_name = Shard.consensus_group_name(keyspace_name, range_start)
+      f.(cg_name, a)
+    end)
+  end
+
+  @doc """
+  """
+  defun list_keys_in_shard(shard_name :: g[atom]) :: [ValuePerKey.key] do
+    {:ok, {keys1, keys2}} = RaftFleet.query(shard_name, :list_keys)
+    keys1 ++ keys2
+  end
+
+  @doc """
+  """
+  defun command_on_all_keys_in_shard(shard_name :: g[atom], command_arg :: ValuePerKey.command_arg) :: :ok | {:error, :no_leader} do
+    case RaftFleet.command(shard_name, {:all_keys_command, command_arg}) do
+      {:ok, _load} -> :ok
+      e            -> e
+    end
+  end
 end

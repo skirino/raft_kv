@@ -10,8 +10,8 @@ defmodule RaftKVTest do
                                     load_per_query_to_missing_key: 1}
   @policy2 Map.put(@policy1, :max_size_per_shard, 50)
 
-  defp with_clients(f) do
-    pids = Enum.map(0 .. (@n_keys - 1), fn i -> spawn_link(fn -> client_loop(i) end) end)
+  defp with_clients(n_clients, loop_fn, f) do
+    pids = Enum.map(0 .. (n_clients - 1), fn i -> spawn_link(fn -> loop_fn.(i) end) end)
     f.()
     Enum.each(pids, fn pid ->
       send(pid, :finish)
@@ -22,13 +22,25 @@ defmodule RaftKVTest do
     end)
   end
 
-  defp client_loop(i) do
+  defp inc_client_loop(i) do
     v = KV.get("#{i}")
     :ok = KV.set("#{i}", "#{String.to_integer(v) + 1}")
     receive do
       :finish -> :ok
     after
-      100 -> client_loop(i)
+      100 -> inc_client_loop(i)
+    end
+  end
+
+  defp append_zero_all_client_loop(i) do
+    shard_names = RaftKV.reduce_keyspace_shard_names(@ks_name, [], &[&1 | &2])
+    Enum.each(shard_names, fn shard_name ->
+      :ok = RaftKV.command_on_all_keys_in_shard(shard_name, :append_zero)
+    end)
+    receive do
+      :finish -> :ok
+    after
+      100 -> append_zero_all_client_loop(i)
     end
   end
 
@@ -54,6 +66,12 @@ defmodule RaftKVTest do
     end
   end
 
+  defp get_all_keys() do
+    RaftKV.reduce_keyspace_shard_names(@ks_name, [], &[&1 | &2])
+    |> Enum.flat_map(&RaftKV.list_keys_in_shard/1)
+    |> Enum.sort()
+  end
+
   setup_all do
     case RaftFleet.activate("zone") do
       :ok                     -> :timer.sleep(100)
@@ -70,26 +88,32 @@ defmodule RaftKVTest do
     assert RaftKV.list_keyspaces() == [@ks_name]
     assert RaftKV.register_keyspace(@ks_name, [], KV, Hook, @policy1) == {:error, :already_registered}
 
-    Enum.each(0 .. (@n_keys - 1), fn i -> KV.set("#{i}", "#{i}") end)
+    keys = Enum.map(0 .. (@n_keys - 1), fn i -> "#{i}" end) |> Enum.sort()
+    Enum.each(keys, fn k -> KV.set(k, k) end)
     assert consensus_group_names() |> length() == 1
 
-    with_clients(fn ->
-      assert RaftKV.get_keyspace_policy(@ks_name) == @policy1
-      :ok = RaftKV.set_keyspace_policy(@ks_name, @policy2)
-      assert RaftKV.get_keyspace_policy(@ks_name) == @policy2
-      :timer.sleep(25_000)
-      assert consensus_group_names() |> length() == 8
-
-      :ok = RaftKV.set_keyspace_policy(@ks_name, @policy1)
-      assert RaftKV.get_keyspace_policy(@ks_name) == @policy1
-      :timer.sleep(30_000)
-      assert consensus_group_names() |> length() == 4
+    with_clients(@n_keys, &inc_client_loop/1, fn ->
+      with_clients(1, &append_zero_all_client_loop/1, fn ->
+        assert get_all_keys() == keys
+        assert RaftKV.get_keyspace_policy(@ks_name) == @policy1
+        :ok = RaftKV.set_keyspace_policy(@ks_name, @policy2)
+        assert RaftKV.get_keyspace_policy(@ks_name) == @policy2
+        :timer.sleep(25_000)
+        assert consensus_group_names() |> length() == 8
+        assert get_all_keys() == keys
+        :ok = RaftKV.set_keyspace_policy(@ks_name, @policy1)
+        assert RaftKV.get_keyspace_policy(@ks_name) == @policy1
+        :timer.sleep(30_000)
+        assert consensus_group_names() |> length() == 4
+        assert get_all_keys() == keys
+      end)
     end)
 
-    Enum.each(0 .. (@n_keys - 1), fn i ->
-      :ok = KV.unset("#{i}")
-      assert KV.get("#{i}") == nil
+    Enum.each(keys, fn k ->
+      :ok = KV.unset(k)
+      assert KV.get(k) == nil
     end)
+    assert get_all_keys() == []
 
     :ok = RaftKV.deregister_keyspace(@ks_name)
     assert RaftKV.list_keyspaces() == []

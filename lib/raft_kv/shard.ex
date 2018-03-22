@@ -27,15 +27,18 @@ defmodule RaftKV.Shard do
     #   on receipt of commands/queries, they return errors that indicate
     #   "I'm not yet allowed to handle your command/query but will soon become the owner of the key. Please retry!".
 
-    @type key_command_pair :: {key :: any, command_arg :: any}
+    alias RaftKV.ValuePerKey
+    @type single_key_command :: {:key, key :: ValuePerKey.key, command_arg :: ValuePerKey.command_arg}
+    @type all_keys_command   :: {:all_keys, command_arg :: ValuePerKey.command_arg}
+    @type command_info       :: single_key_command | all_keys_command
 
     @type t :: :normal
-             | {:pre_split_former , commands :: [key_command_pair]}
+             | {:pre_split_former , commands :: [command_info]}
              | {:pre_split_latter , range_start_after_split :: Hash.t}
-             | {:post_split_former, commands :: [key_command_pair]}
+             | {:post_split_former, commands :: [command_info]}
              | {:pre_merge_former , next_range_data :: map}
-             | {:pre_merge_latter , commands :: [key_command_pair]}
-             | {:post_merge_latter, commands :: [key_command_pair]}
+             | {:pre_merge_latter , commands :: [command_info]}
+             | {:post_merge_latter, commands :: [command_info]}
 
     defun valid?(t :: any) :: boolean do
       :normal                                -> true
@@ -48,10 +51,16 @@ defmodule RaftKV.Shard do
       _                                      -> false
     end
 
-    defun remember_command(t :: t, which :: :former | :latter, command :: {any, any}) :: t do
-      ({:pre_split_former, cs}, :latter, c ) -> {:pre_split_former, [c | cs]}
-      ({:pre_merge_latter, cs}, _which , c ) -> {:pre_merge_latter, [c | cs]}
-      (status                 , _which , _c) -> status
+    defun remember_single_key_command(t :: t, which :: :former | :latter, pair :: {ValuePerKey.key, ValuePerKey.command_arg}) :: t do
+      ({:pre_split_former, cs}, :latter, {key, arg}) -> {:pre_split_former, [{:key, key, arg} | cs]}
+      ({:pre_merge_latter, cs}, _which , {key, arg}) -> {:pre_merge_latter, [{:key, key, arg} | cs]}
+      (status                 , _which , _         ) -> status
+    end
+
+    defun remember_all_keys_command(t :: t, command_arg :: ValuePerKey.command_arg) :: t do
+      ({:pre_split_former, cs}, arg) -> {:pre_split_former, [{:all_keys, arg} | cs]}
+      ({:pre_merge_latter, cs}, arg) -> {:pre_merge_latter, [{:all_keys, arg} | cs]}
+      (status                 , _  ) -> status
     end
   end
 
@@ -96,6 +105,7 @@ defmodule RaftKV.Shard do
       state ->
         case arg do
           {:c, key, command_arg}                             -> command_impl(state, key, command_arg)
+          {:all_keys_command, command_arg}                   -> all_keys_command_impl(state, command_arg)
           {:split_prepare, latter_range_start}               -> split_prepare(state, latter_range_start)
           {:split_install, _latter_range_start, _data}       -> {{:error, :already_initialized}, state}
           {:split_shift_range_end, latter_range_start}       -> split_shift_range_end(state, latter_range_start)
@@ -127,14 +137,12 @@ defmodule RaftKV.Shard do
     }
   end
 
-  defp split_install(r_start, data) do
-    %{
-      keyspace_name:    ks_name,
-      data_module:      d,
-      hook_module:      h,
-      range_end:        r_end,
-      keys_latter_half: keys,
-    } = data
+  defp split_install(r_start,
+                     %{keyspace_name:    ks_name,
+                       data_module:      d,
+                       hook_module:      h,
+                       range_end:        r_end,
+                       keys_latter_half: keys}) do
     r_middle = div(r_start + r_end, 2)
     {keys1, size1, keys2, size2} = split_keys_map(ks_name, r_middle, keys)
     %__MODULE__{
@@ -197,7 +205,7 @@ defmodule RaftKV.Shard do
                            key,
                            command_arg) do
       {ret, load, new_keys, new_total} = apply_command_to_half(d, keys, total, key, command_arg)
-      new_status = Status.remember_command(status, unquote(which), {key, command_arg})
+      new_status = Status.remember_single_key_command(status, unquote(which), {key, command_arg})
       new_state = %__MODULE__{state | :status => new_status, unquote(keys_field) => new_keys, unquote(size_field) => new_total}
       {{:ok, ret, load}, new_state}
     end
@@ -210,6 +218,51 @@ defmodule RaftKV.Shard do
       nil -> {ret, load, Map.delete(keys, key)                   , total            - size}
       _   -> {ret, load, Map.put(keys, key, {new_data, new_size}), total + new_size - size}
     end
+  end
+
+  defp apply_command_to_both(ks_name, d, r_middle, {keys1, size1, keys2, size2}, command) do
+    case command do
+      {:key, key, arg} ->
+        case Hash.from_key(ks_name, key) do
+          h when h < r_middle ->
+            {_ret, _load, new_keys1, new_size1} = apply_command_to_half(d, keys1, size1, key, arg)
+            {new_keys1, new_size1, keys2, size2}
+          _ ->
+            {_ret, _load, new_keys2, new_size2} = apply_command_to_half(d, keys2, size2, key, arg)
+            {keys1, size1, new_keys2, new_size2}
+        end
+      {:all_keys, arg} ->
+        {_load1, new_keys1, new_size1} = apply_all_keys_command_to_half(d, keys1, arg)
+        {_load2, new_keys2, new_size2} = apply_all_keys_command_to_half(d, keys2, arg)
+        {new_keys1, new_size1, new_keys2, new_size2}
+    end
+  end
+
+  defp apply_all_keys_command_to_half(d, keys, command_arg) do
+    Enum.reduce(keys, {0, %{}, 0}, fn({key, {data, size}}, {load_acc, map, size_acc}) ->
+      {_ret, load, new_size, new_data} = d.command(data, size, key, command_arg)
+      case new_data do
+        nil -> {load_acc + load, map                                    , size_acc           }
+        _   -> {load_acc + load, Map.put(map, key, {new_data, new_size}), size_acc + new_size}
+      end
+    end)
+  end
+
+  defp all_keys_command_impl(%__MODULE__{data_module:      d,
+                                         status:           status,
+                                         keys_former_half: keys1,
+                                         keys_latter_half: keys2} = state,
+                             command_arg) do
+    {load1, new_keys1, new_size1} = apply_all_keys_command_to_half(d, keys1, command_arg)
+    {load2, new_keys2, new_size2} = apply_all_keys_command_to_half(d, keys2, command_arg)
+    new_state = %__MODULE__{state |
+      status:           Status.remember_all_keys_command(status, command_arg),
+      keys_former_half: new_keys1,
+      keys_latter_half: new_keys2,
+      size_former_half: new_size1,
+      size_latter_half: new_size2,
+    }
+    {load1 + load2, new_state}
   end
 
   #
@@ -264,17 +317,32 @@ defmodule RaftKV.Shard do
 
   defp split_shift_range_start(%__MODULE__{status: status} = state, cmds) do
     case status do
-      {:pre_split_latter, new_range_start} -> {:ok, become_normal_and_apply_commands(state, new_range_start, cmds)}
+      {:pre_split_latter, new_range_start} -> {:ok, apply_commands_and_shift_range_start(state, new_range_start, cmds)}
       _                                    -> {error_status_unmatch(state), state}
     end
   end
 
-  defp become_normal_and_apply_commands(state0, new_range_start, cmds) do
-    state = %__MODULE__{state0 | status: :normal, range_start: new_range_start}
-    Enum.reduce(cmds, state, fn({key, arg}, s1) ->
-      {_ret, s2} = command_impl(s1, key, arg)
-      s2
-    end)
+  defp apply_commands_and_shift_range_start(%__MODULE__{keyspace_name:    ks_name,
+                                                        data_module:      d,
+                                                        range_middle:     r_middle,
+                                                        keys_former_half: keys1,
+                                                        keys_latter_half: keys2,
+                                                        size_former_half: size1,
+                                                        size_latter_half: size2} = state,
+                                            new_range_start,
+                                            cmds) do
+    {new_keys1, new_size1, new_keys2, new_size2} =
+      Enum.reduce(cmds, {keys1, size1, keys2, size2}, fn(cmd, tuple4) ->
+        apply_command_to_both(ks_name, d, r_middle, tuple4, cmd)
+      end)
+    %__MODULE__{state |
+      status:           :normal,
+      range_start:      new_range_start,
+      keys_former_half: new_keys1,
+      keys_latter_half: new_keys2,
+      size_former_half: new_size1,
+      size_latter_half: new_size2,
+    }
   end
 
   defp split_discard_commands(%__MODULE__{status: status} = state) do
@@ -345,28 +413,34 @@ defmodule RaftKV.Shard do
                              latter_range_start,
                              cmds) do
     case status do
-      {:pre_merge_former, next_range_data}    -> {:ok, shift_range_and_apply_commands(state, next_range_data, cmds)}
+      {:pre_merge_former, next_range_data}    -> {:ok, apply_commands_and_shift_range_end(state, next_range_data, cmds)}
       :normal when latter_range_start < r_end -> {:ok, state}
       _                                       -> {error_status_unmatch(state), state}
     end
   end
 
-  defp shift_range_and_apply_commands(%__MODULE__{keyspace_name:    ks_name,
-                                                  range_start:      r_start,
-                                                  range_end:        r_end,
-                                                  keys_former_half: keys1,
-                                                  keys_latter_half: keys2,
-                                                  size_former_half: size1,
-                                                  size_latter_half: size2} = state1,
-                                      %{range_end:        next_r_end,
-                                        keys_former_half: keys3,
-                                        keys_latter_half: keys4,
-                                        size_former_half: size3,
-                                        size_latter_half: size4},
-                                      cmds) do
+  defp apply_commands_and_shift_range_end(%__MODULE__{keyspace_name:    ks_name,
+                                                      data_module:      d,
+                                                      range_start:      r_start,
+                                                      range_end:        r_end,
+                                                      keys_former_half: keys1,
+                                                      keys_latter_half: keys2,
+                                                      size_former_half: size1,
+                                                      size_latter_half: size2} = state1,
+                                          %{range_middle:     next_r_middle,
+                                            range_end:        next_r_end,
+                                            keys_former_half: keys3,
+                                            keys_latter_half: keys4,
+                                            size_former_half: size3,
+                                            size_latter_half: size4},
+                                          cmds) do
+    {new_keys3, new_size3, new_keys4, new_size4} =
+      Enum.reduce(cmds, {keys3, size3, keys4, size4}, fn(cmd, tuple4) ->
+        apply_command_to_both(ks_name, d, next_r_middle, tuple4, cmd)
+      end)
     {new_r_middle, keys_former, size_former, keys_latter, size_latter} =
-      merge_keys_maps(ks_name, r_start, r_end, next_r_end, keys1, keys2, keys3, keys4, size1, size2, size3, size4)
-    state2 = %__MODULE__{state1 |
+      merge_keys_maps(ks_name, r_start, r_end, next_r_end, keys1, keys2, new_keys3, new_keys4, size1, size2, new_size3, new_size4)
+    %__MODULE__{state1 |
       status:           :normal,
       range_middle:     new_r_middle,
       range_end:        next_r_end,
@@ -375,10 +449,6 @@ defmodule RaftKV.Shard do
       size_former_half: size_former,
       size_latter_half: size_latter,
     }
-    Enum.reduce(cmds, state2, fn({key, arg}, s1) ->
-      {_ret, s2} = command_impl(s1, key, arg)
-      s2
-    end)
   end
 
   defp merge_keys_maps(ks_name,
@@ -424,6 +494,7 @@ defmodule RaftKV.Shard do
         case arg do
           {:q, key, query_arg} -> query_impl(state, key, query_arg)
           :get_total_size      -> get_total_size(state)
+          :list_keys           -> list_keys(state)
           _                    -> :ok
         end
     end
@@ -455,6 +526,10 @@ defmodule RaftKV.Shard do
       {:post_merge_latter, _} -> {:error, :post_merge_latter}
       _                       -> {:ok, map_size(keys_former) + map_size(keys_latter), s1 + s2}
     end
+  end
+
+  defp list_keys(%__MODULE__{keys_former_half: keys1, keys_latter_half: keys2}) do
+    {Map.keys(keys1), Map.keys(keys2)}
   end
 
   #
