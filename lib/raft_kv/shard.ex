@@ -83,6 +83,22 @@ defmodule RaftKV.Shard do
     size_latter_half: Croma.NonNegInteger,
   ]
 
+  def valid?(v) do
+    super(v) and check?(v)
+  end
+
+  defp check?(%__MODULE__{status:       status,
+                          range_start:  r_start,
+                          range_middle: r_middle,
+                          range_end:    r_end}) do
+    # Checking all keys may take too long, so we omit it.
+    case status do
+      {:pre_split_latter, new_range_start} -> r_start == r_end and (new_range_start + r_end == 2 * r_middle)
+      {:post_merge_latter, _}              -> r_start == r_end
+      _                                    -> r_start < r_middle and r_middle < r_end and (r_start + r_end == 2 * r_middle)
+    end
+  end
+
   @behaviour RVData
 
   @impl true
