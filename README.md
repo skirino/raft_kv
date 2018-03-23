@@ -15,7 +15,7 @@ An Elixir library to store key-value pairs in a distributed, fault-tolerant, sel
     - Operation on a stored value must be given as an implementation of `RaftKV.ValuePerKey` behaviour.
 - Built on top of [raft_fleet](https://github.com/skirino/raft_fleet).
     - Key-value pairs are sharded into multiple Raft consensus groups by hash partitioning.
-- Shards are automatically split/merged according to number of keys, data size and current load.
+- Based on number of keys, data size and current load, shards are automatically split/merged in a transparent manner.
 - Designed for many key-value pairs and throughput.
 
 ## Usage

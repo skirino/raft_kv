@@ -89,37 +89,52 @@ defmodule RaftKV.KeyspaceInfo do
                                   threshold_time,
                                   range_start,
                                   {last_split_merge_time, n_keys, size, load}) do
-    if eligible_for_split_or_merge?(last_split_merge_time, threshold_time) do
-      max_ratio = ratio(n_keys, max_keys) |> max(ratio(size, max_size)) |> max(ratio(load, max_load))
-      # Avoid splitting shard with `n_keys == 1`, as (probably) splitting won't help in that case.
-      if n_keys > 1 and max_ratio > 1.0 do
-        {:split, {max_ratio, range_start}}
-      else
-        # Merge shards only when all `n_keys` and `size` are filled (i.e., don't merge if in doubt); `load == nil` is regarded as no load
-        if n_keys && size && max_ratio < merge_threshold_ratio do
-          case tree_next(shards, range_start) do
-            nil ->
-              nil
-            {next_range_start, {last_split_merge_time2, n_keys2, size2, load2}} ->
-              if eligible_for_split_or_merge?(last_split_merge_time2, threshold_time) and n_keys2 && size2 do
-                ratio_if_merged = ratio(n_keys + n_keys2, max_keys) |> max(ratio(size + size2, max_size)) |> max(ratio((load || 0) + (load2 || 0), max_load))
-                if ratio_if_merged < merge_threshold_ratio do
-                  {:merge, {ratio_if_merged, range_start, next_range_start}}
-                end
-              end
+    if max_keys || max_size || max_load do # at least 1 limit must be specified to perform split/merge
+      if n_keys do
+        debug_assert(size) # `size` should also be filled when `n_keys` is filled.
+        stats = {n_keys, size, load || 0} # If `load` is not filled (even though `n_keys` is filled), treat this as "no load".
+        if eligible_for_split_or_merge?(last_split_merge_time, threshold_time) do
+          limits = {max_keys, max_size, max_load}
+          case calc_max_ratio(stats, limits) do
+            max_ratio when max_ratio > 1.0 and n_keys > 1    -> {:split, {max_ratio, range_start}} # Don't split shard with `n_keys == 1`, as (probably) splitting won't help in that case.
+            max_ratio when max_ratio < merge_threshold_ratio -> compute_merge_demand(shards, threshold_time, range_start, merge_threshold_ratio, stats, limits)
+            _otherwise                                       -> nil
           end
         end
       end
     end
   end
 
+  defp compute_merge_demand(shards, threshold_time, range_start, merge_threshold_ratio, {n_keys, size, load}, limits) do
+    case tree_next(shards, range_start) do
+      {next_range_start, {last_split_merge_time2, n_keys2, size2, load2}} when is_integer(n_keys2) ->
+        debug_assert(size2) # `size2` should also be filled when `n_keys2` is filled.
+        load2 = load2 || 0 # If `load2` is not filled (even though `n_keys2` is filled), treat this as "no load".
+        if eligible_for_split_or_merge?(last_split_merge_time2, threshold_time) do
+          max_ratio_when_merged = calc_max_ratio({n_keys + n_keys2, size + size2, load + load2}, limits)
+          if max_ratio_when_merged < merge_threshold_ratio do
+            {:merge, {max_ratio_when_merged, range_start, next_range_start}}
+          end
+        end
+      _no_next_or_n_keys2_is_nil ->
+        nil
+    end
+  end
+
+  defp calc_max_ratio({n_keys, size, load}, {max_keys, max_size, max_load}) do
+    [
+      {n_keys, max_keys},
+      {size  , max_size},
+      {load  , max_load},
+    ]
+    |> Enum.reject(&match?({_, nil}, &1))
+    |> Enum.map(fn {value, limit} -> value / limit end)
+    |> Enum.max() # should not fail as at least 1 limit is non-nil
+  end
+
   defp eligible_for_split_or_merge?(nil                  , _t            ), do: true
   defp eligible_for_split_or_merge?(:locked              , _t            ), do: false
   defp eligible_for_split_or_merge?(last_split_merge_time, threshold_time), do: last_split_merge_time < threshold_time
-
-  defp ratio(nil  , _  ), do: 0.0
-  defp ratio(_    , nil), do: 0.0
-  defp ratio(value, max), do: value / max
 
   defun check_if_splittable(%__MODULE__{policy: %SplitMergePolicy{max_shards: max_shards},
                                         shards: shards} = info,

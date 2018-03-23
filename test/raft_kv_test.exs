@@ -4,7 +4,7 @@ defmodule RaftKVTest do
 
   @n_keys 1000
   @ks_name :kv
-  @policy1 %RaftKV.SplitMergePolicy{max_shards: 8, min_shards: 4}
+  @policy1 %RaftKV.SplitMergePolicy{max_shards: 8, min_shards: 4, max_keys_per_shard: 1000}
   @policy2 Map.put(@policy1, :max_keys_per_shard, 50)
 
   defp with_clients(n_clients, loop_fn, f) do
