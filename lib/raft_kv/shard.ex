@@ -271,7 +271,7 @@ defmodule RaftKV.Shard do
                              command_arg) do
     case status do
       {:pre_split_latter, _} ->
-        # In this case this shard hasn't yet acquire ownership of the keys. Nothing to do.
+        # This shard hasn't yet acquire ownership of the keys. Nothing to do.
         {0, state}
       _ ->
         {load1, new_keys1, new_size1} = apply_all_keys_command_to_half(d, keys1, command_arg)
@@ -522,7 +522,11 @@ defmodule RaftKV.Shard do
     end
   end
 
-  defp query_impl(%__MODULE__{data_module: d, keys_former_half: keys_former, keys_latter_half: keys_latter} = state, key, query_arg) do
+  defp query_impl(%__MODULE__{data_module:      d,
+                              keys_former_half: keys_former,
+                              keys_latter_half: keys_latter} = state,
+                  key,
+                  query_arg) do
     case check_key_position(state, key) do
       {:error, _} = e -> e
       :former         -> run_query(d, keys_former, key, query_arg)
@@ -546,12 +550,18 @@ defmodule RaftKV.Shard do
                                   size_latter_half: s2}) do
     case status do
       {:post_merge_latter, _} -> {:error, :post_merge_latter}
+      {:pre_split_latter , _} -> {:ok, 0                                            , 0      } # This shard hasn't yet acquire ownership of the keys.
       _                       -> {:ok, map_size(keys_former) + map_size(keys_latter), s1 + s2}
     end
   end
 
-  defp list_keys(%__MODULE__{keys_former_half: keys1, keys_latter_half: keys2}) do
-    {Map.keys(keys1), Map.keys(keys2)}
+  defp list_keys(%__MODULE__{status:           status,
+                             keys_former_half: keys1,
+                             keys_latter_half: keys2}) do
+    case status do
+      {:pre_split_latter, _} -> {[]             , []             } # This shard hasn't yet acquire ownership of the keys.
+      _                      -> {Map.keys(keys1), Map.keys(keys2)}
+    end
   end
 
   #

@@ -32,7 +32,7 @@ defmodule RaftKVTest do
     receive do
       :finish -> exit({:shutdown, n_inc2})
     after
-      100 -> get_or_inc_client_loop(i, n_inc2, n_times + 1)
+      200 -> get_or_inc_client_loop(i, n_inc2, n_times + 1)
     end
   end
 
@@ -45,7 +45,7 @@ defmodule RaftKVTest do
     receive do
       :finish -> exit({:shutdown, n_times2})
     after
-      100 -> inc_all_client_loop(i, n_times2)
+      200 -> inc_all_client_loop(i, n_times2)
     end
   end
 
