@@ -10,14 +10,13 @@ defmodule KV do
 
   @impl true
   def command(_previous_value, _size, _key, {:set, value}) do
-    {:ok, 5, value, byte_size(value)}
+    {:ok, 5, value, 1}
   end
   def command(_previous_value, _size, _key, :unset) do
     {:ok, 5, nil, 0}
   end
-  def command(value, _size, _key, :append_zero) do
-    new_value = value <> "0"
-    {:ok, 5, new_value, byte_size(new_value)}
+  def command(value, _size, _key, :inc) do
+    {:ok, 5, value + 1, 1}
   end
 
   @impl true
@@ -42,6 +41,11 @@ defmodule KV do
 
   def unset(k) do
     {:ok, :ok} = RaftKV.command(:kv, k, :unset)
+    :ok
+  end
+
+  def inc(k) do
+    {:ok, :ok} = RaftKV.command(:kv, k, :inc)
     :ok
   end
 end
