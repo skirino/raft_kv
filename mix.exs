@@ -6,7 +6,7 @@ defmodule RaftKV.MixProject do
   def project() do
     [
       app:               :raft_kv,
-      version:           "0.1.0",
+      version:           "0.1.1",
       elixir:            "~> 1.6",
       build_embedded:    Mix.env() == :prod,
       start_permanent:   Mix.env() == :prod,
