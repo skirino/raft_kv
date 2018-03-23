@@ -269,16 +269,22 @@ defmodule RaftKV.Shard do
                                          keys_former_half: keys1,
                                          keys_latter_half: keys2} = state,
                              command_arg) do
-    {load1, new_keys1, new_size1} = apply_all_keys_command_to_half(d, keys1, command_arg)
-    {load2, new_keys2, new_size2} = apply_all_keys_command_to_half(d, keys2, command_arg)
-    new_state = %__MODULE__{state |
-      status:           Status.remember_all_keys_command(status, command_arg),
-      keys_former_half: new_keys1,
-      keys_latter_half: new_keys2,
-      size_former_half: new_size1,
-      size_latter_half: new_size2,
-    }
-    {load1 + load2, new_state}
+    case status do
+      {:pre_split_latter, _} ->
+        # In this case this shard hasn't yet acquire ownership of the keys. Nothing to do.
+        {0, state}
+      _ ->
+        {load1, new_keys1, new_size1} = apply_all_keys_command_to_half(d, keys1, command_arg)
+        {load2, new_keys2, new_size2} = apply_all_keys_command_to_half(d, keys2, command_arg)
+        new_state = %__MODULE__{state |
+          status:           Status.remember_all_keys_command(status, command_arg),
+          keys_former_half: new_keys1,
+          keys_latter_half: new_keys2,
+          size_former_half: new_size1,
+          size_latter_half: new_size2,
+        }
+        {load1 + load2, new_state}
+    end
   end
 
   #
@@ -565,6 +571,9 @@ defmodule RaftKV.Shard do
         {{:c, key, arg}, {:ok, ret, load}} ->
           report_load(data_after, load)
           run_on_command_hook(data_before, key, arg, ret, data_after)
+        {{:all_keys_command, arg}, load} when is_integer(load) ->
+          report_load(data_after, load)
+          run_on_command_hook_for_all_keys(data_before, arg, data_after)
         _ ->
           :ok
       end
@@ -585,8 +594,27 @@ defmodule RaftKV.Shard do
             end
           {data_before, size_before} = Map.get(keys_before, key, {nil, 0})
           {data_after , size_after } = Map.get(keys_after , key, {nil, 0})
+          debug_assert(data_before || data_after)
           h.on_command_committed(data_before, size_before, key, arg, ret, data_after, size_after)
       end
+    end
+
+    defp run_on_command_hook_for_all_keys(%Shard{keys_former_half: keys1, keys_latter_half: keys2},
+                                          arg,
+                                          %Shard{hook_module: h, keys_former_half: keys3, keys_latter_half: keys4}) do
+      case h do
+        nil -> :ok
+        _   ->
+          run_on_command_hook_for_all_keys_in_half(h, keys1, keys3, arg)
+          run_on_command_hook_for_all_keys_in_half(h, keys2, keys4, arg)
+      end
+    end
+
+    defp run_on_command_hook_for_all_keys_in_half(h, keys_before, keys_after, arg) do
+      Enum.each(keys_before, fn {key, {data_before, size_before}} ->
+        {data_after, size_after} = Map.get(keys_after, key, {nil, 0})
+        h.on_command_committed(data_before, size_before, key, arg, nil, data_after, size_after)
+      end)
     end
 
     defun on_query_answered(data      :: v[:uninitialized | Shard.t],
