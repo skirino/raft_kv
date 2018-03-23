@@ -87,7 +87,7 @@ defmodule RaftKV do
   @doc """
   Retrieves the current value of `t:RaftKV.SplitMergePolicy.t/0` used for the specified keyspace.
   """
-  defun get_keyspace_policy(keyspace_name :: g[atom]) :: v[SplitMergePolicy.t] do
+  defun get_keyspace_policy(keyspace_name :: g[atom]) :: v[nil | SplitMergePolicy.t] do
     {:ok, policy} = RaftFleet.query(Keyspaces, {:get_policy, keyspace_name})
     policy
   end
@@ -95,9 +95,13 @@ defmodule RaftKV do
   @doc """
   Replaces the current `t:RaftKV.SplitMergePolicy.t/0` of a keyspace with the specified one.
   """
-  defun set_keyspace_policy(keyspace_name :: g[atom], policy :: v[SplitMergePolicy.t]) :: :ok | {:error, :no_such_keyspace} do
-    {:ok, r} = RaftFleet.command(Keyspaces, {:set_policy, keyspace_name, policy})
-    r
+  defun set_keyspace_policy(keyspace_name :: g[atom], policy :: SplitMergePolicy.t) :: :ok | {:error, :invalid_policy | :no_such_keyspace} do
+    if SplitMergePolicy.valid?(policy) do
+      {:ok, r} = RaftFleet.command(Keyspaces, {:set_policy, keyspace_name, policy})
+      r
+    else
+      {:error, :invalid_policy}
+    end
   end
 
   #

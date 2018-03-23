@@ -143,4 +143,10 @@ defmodule RaftKVTest do
     assert RaftKV.deregister_keyspace(@ks_name) == {:error, :no_such_keyspace}
     wait_until_all_consensus_groups_removed()
   end
+
+  test "error response in manipulating keyspaces" do
+    assert RaftKV.get_keyspace_policy(:foo)           == nil
+    assert RaftKV.set_keyspace_policy(:foo, nil)      == {:error, :invalid_policy}
+    assert RaftKV.set_keyspace_policy(:foo, @policy1) == {:error, :no_such_keyspace}
+  end
 end
