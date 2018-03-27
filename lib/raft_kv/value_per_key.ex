@@ -33,7 +33,7 @@ defmodule RaftKV.ValuePerKey do
   - 2nd element : The next version of the value after the command. If you return `nil` the key is removed.
   - 3rd element : Size of the next version of the value (in an arbitrary unit). Neglected if you specify `nil` for the 3rd element.
   """
-  @callback command(value, size, key, command_arg) :: {command_ret, load, nil | value, size}
+  @callback command(nil | value, size, key, command_arg) :: {command_ret, load, nil | value, size}
 
   @doc """
   Read-only operation on the stored value.
