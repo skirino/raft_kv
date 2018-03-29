@@ -179,8 +179,8 @@ defmodule RaftKV.Shard do
   defp split_keys_map(ks_name, r_middle, keys) do
     Enum.reduce(keys, {%{}, 0, %{}, 0}, fn({k, {_data, s} = pair}, {m1, s1, m2, s2}) ->
       case Hash.from_key(ks_name, k) do
-        h when h < r_middle -> {Map.put(m1, k, pair), s1 + s, m2                  , s2    }
-        _                   -> {m1                  , s1    , Map.put(m2, k, pair), s2 + s}
+        hash when hash < r_middle -> {Map.put(m1, k, pair), s1 + s, m2                  , s2    }
+        _                         -> {m1                  , s1    , Map.put(m2, k, pair), s2 + s}
       end
     end)
   end
@@ -195,18 +195,18 @@ defmodule RaftKV.Shard do
 
   defp check_key_position(%__MODULE__{keyspace_name: ks_name, status: status, range_start: s, range_middle: m, range_end: e}, key) do
     case Hash.from_key(ks_name, key) do
-      h when h < s ->
+      hash when hash < s ->
         case status do
-          {:pre_split_latter, new_range_start} when new_range_start <= h -> {:error, :will_own_the_key_retry_afterward}
-          _                                                              -> {:error, {:below_range, s}}
+          {:pre_split_latter, new_range_start} when new_range_start <= hash -> {:error, :will_own_the_key_retry_afterward}
+          _                                                                 -> {:error, {:below_range, s}}
         end
-      h when e <= h ->
+      hash when e <= hash ->
         case status do
-          {:pre_merge_former, %{range_end: new_range_end}} when h < new_range_end -> {:error, :will_own_the_key_retry_afterward}
-          _                                                                       -> {:error, {:above_range, e}}
+          {:pre_merge_former, %{range_end: new_range_end}} when hash < new_range_end -> {:error, :will_own_the_key_retry_afterward}
+          _                                                                          -> {:error, {:above_range, e}}
         end
-      h when h < m -> :former
-      _            -> :latter
+      hash when hash < m -> :former
+      _                  -> :latter
     end
   end
 
@@ -240,7 +240,7 @@ defmodule RaftKV.Shard do
     case command do
       {:key, key, arg} ->
         case Hash.from_key(ks_name, key) do
-          h when h < r_middle ->
+          hash when hash < r_middle ->
             {_ret, _load, new_keys1, new_size1} = apply_command_to_half(d, keys1, size1, key, arg)
             {new_keys1, new_size1, keys2, size2}
           _ ->
@@ -498,8 +498,8 @@ defmodule RaftKV.Shard do
     {keys1, size1, keys2, size2} =
       Enum.reduce(keys_to_divide, {keys_former, size_former, keys_latter, size_latter}, fn({k, {_data, s} = pair}, {m1, s1, m2, s2}) ->
         case Hash.from_key(ks_name, k) do
-          h when h < r_middle -> {Map.put(m1, k, pair), s1 + s, m2                  , s2    }
-          _                   -> {m1                  , s1    , Map.put(m2, k, pair), s2 + s}
+          hash when hash < r_middle -> {Map.put(m1, k, pair), s1 + s, m2                  , s2    }
+          _                         -> {m1                  , s1    , Map.put(m2, k, pair), s2 + s}
         end
       end)
     {r_middle, keys1, size1, keys2, size2}
@@ -599,8 +599,8 @@ defmodule RaftKV.Shard do
         _   ->
           {keys_before, keys_after} =
             case Hash.from_key(ks_name, key) do
-              h when h < r_middle -> {keys1, keys3}
-              _                   -> {keys2, keys4}
+              hash when hash < r_middle -> {keys1, keys3}
+              _                         -> {keys2, keys4}
             end
           {data_before, size_before} = Map.get(keys_before, key, {nil, 0})
           {data_after , size_after } = Map.get(keys_after , key, {nil, 0})
