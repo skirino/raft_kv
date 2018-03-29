@@ -74,3 +74,31 @@ KV.get("foo")        # => nil
 KV.set("foo", "bar") # => :ok
 KV.get("foo")        # => "bar"
 ```
+
+Initially there's only one shard.
+```ex
+RaftKV.reduce_keyspace_shard_names(:kv, [], &[&1 | &2]) # => [:kv_0]
+```
+
+When the number of key-value pairs exceeds the limit per shard (`100`) as follows...
+```ex
+Enum.each(1..200, fn i -> KV.set("#{i}", i) end)
+```
+
+then shards are automatically split.
+(Depending on the configurations it may take several minutes. See `RaftKV.Config` for more detail.)
+```ex
+RaftKV.reduce_keyspace_shard_names(:kv, [], &[&1 | &2]) # => [:kv_100663296, :kv_67108864, :kv_0]
+```
+
+Similarly, when you remove key-value pairs...
+```ex
+Enum.each(1..200, fn i -> KV.unset("#{i}") end)
+```
+
+the shards are automatically merged.
+```ex
+RaftKV.reduce_keyspace_shard_names(:kv, [], &[&1 | &2]) # => [:kv_0]
+```
+
+Shard splits and merges are transparent from client processes interacting with key-value pairs.
