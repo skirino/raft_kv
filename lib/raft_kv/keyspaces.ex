@@ -294,6 +294,7 @@ defmodule RaftKV.Keyspaces do
 
     @behaviour RaftedValue.LeaderHook
 
+    @impl true
     defun on_command_committed(_data_before_command :: Keyspaces.t,
                                command_arg          :: RVData.command_arg,
                                command_ret          :: RVData.command_ret,
@@ -304,24 +305,29 @@ defmodule RaftKV.Keyspaces do
       end
     end
 
+    @impl true
     defun on_query_answered(_data      :: Keyspaces.t,
                             _query_arg :: RVData.query_arg,
                             _query_ret :: RVData.query_ret) :: any do
       :ok
     end
 
+    @impl true
     defun on_follower_added(_data :: Keyspaces.t, _pid :: pid) :: any do
       :ok
     end
 
+    @impl true
     defun on_follower_removed(_data :: Keyspaces.t, _pid :: pid) :: any do
       :ok
     end
 
+    @impl true
     defun on_elected(_data :: Keyspaces.t) :: any do
       :ok
     end
 
+    @impl true
     defun on_restored_from_files(_data :: Keyspaces.t) :: any do
       :ok
     end
