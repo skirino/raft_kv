@@ -32,7 +32,7 @@ defmodule RaftKVTest do
     receive do
       :finish -> exit({:shutdown, n_inc2})
     after
-      200 -> get_or_inc_client_loop(i, n_inc2, n_times + 1)
+      100 -> get_or_inc_client_loop(i, n_inc2, n_times + 1)
     end
   end
 
@@ -45,7 +45,7 @@ defmodule RaftKVTest do
     receive do
       :finish -> exit({:shutdown, n_times2})
     after
-      200 -> inc_all_client_loop(i, n_times2)
+      100 -> inc_all_client_loop(i, n_times2)
     end
   end
 
@@ -95,8 +95,30 @@ defmodule RaftKVTest do
     assert RaftKV.register_keyspace(@ks_name, [], KV, Hook, @policy1) == {:error, :already_registered}
 
     keys = Enum.to_list(0 .. (@n_keys - 1))
-    Enum.each(keys, fn k -> KV.set(k, 0) end)
+    Enum.each(keys, fn i -> KV.set(i, 0) end)
     assert consensus_group_names() |> length() == 1
+
+    n_inc_alls =
+      with_clients(10, &inc_all_client_loop/1, fn ->
+        switch_policy(@policy2)
+        :timer.sleep(30_000)
+        assert consensus_group_names() |> length() == 8
+        switch_policy(@policy1)
+        :timer.sleep(30_000)
+        assert consensus_group_names() |> length() == 4
+      end)
+    n_inc_all = Enum.map(n_inc_alls, fn {_, n} -> n end) |> Enum.sum()
+    assert get_all_keys() == keys
+    Enum.each(keys, fn i ->
+      # "Fetching all shard names and then running :inc as all_keys command" is inherently not rigorous;
+      # we accept slight deviations from the expected value.
+      v = KV.get(i)
+      assert n_inc_all - 10 < v
+      assert v              < n_inc_all + 10
+    end)
+
+    # reset values
+    Enum.each(keys, fn i -> KV.set(i, 0) end)
 
     n_increments =
       with_clients(@n_keys, &get_or_inc_client_loop/1, fn ->
@@ -110,26 +132,6 @@ defmodule RaftKVTest do
     assert get_all_keys() == keys
     Enum.each(n_increments, fn {i, n} ->
       assert KV.get(i) == n
-    end)
-
-    n_inc_alls =
-      with_clients(10, &inc_all_client_loop/1, fn ->
-        switch_policy(@policy2)
-        :timer.sleep(30_000)
-        assert consensus_group_names() |> length() == 8
-        switch_policy(@policy1)
-        :timer.sleep(30_000)
-        assert consensus_group_names() |> length() == 4
-      end)
-    n_inc_all = Enum.map(n_inc_alls, fn {_, n} -> n end) |> Enum.sum()
-    assert get_all_keys() == keys
-    Enum.each(n_increments, fn {i, n} ->
-      # "Fetching all shard names and then running :inc as all_keys command" is inherently not rigorous;
-      # we accept slight deviations from the expected value.
-      v = KV.get(i)
-      expected = n + n_inc_all
-      assert expected - 5 < v
-      assert v            < expected + 5
     end)
 
     Enum.each(keys, fn i ->
