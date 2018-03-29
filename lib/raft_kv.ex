@@ -180,7 +180,7 @@ defmodule RaftKV do
       {:error, _reason} = e -> e
       {:ok, result}         ->
         case result do
-          {:ok, ret, _load}                -> {:ok, ret}
+          {:ok, _ret} = ok                 -> ok
           {:error, :key_not_found} = e     -> e # Only for queries
           {:error, {:below_range, _start}} ->
             # The shard should have already been merged; the marker in ETS is already stale.
@@ -239,8 +239,8 @@ defmodule RaftKV do
     retry_interval = Keyword.get(options, :retry_interval, @default_retry_interval)
     call_module    = Keyword.get(options, :call_module   , @default_call_module   )
     case RaftFleet.command(shard_name, {:all_keys_command, command_arg}, timeout, retry, retry_interval, call_module) do
-      {:ok, _load} -> :ok
-      e            -> e
+      {:ok, :ok} -> :ok
+      e          -> e
     end
   end
 end

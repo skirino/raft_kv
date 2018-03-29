@@ -9,9 +9,8 @@ defmodule RaftKV.Application do
     children = [
       RaftKV.EtsRecordManager,
       RaftKV.WorkflowExecutor,
-      RaftKV.SizeCollector,
-      RaftKV.LoadAccumulator,
-      RaftKV.LocalStatsReporter,
+      RaftKV.StatsCollector,
+      RaftKV.StatsReporter,
     ]
     Supervisor.start_link(children, [strategy: :one_for_one])
   end

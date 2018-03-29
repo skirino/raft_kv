@@ -1,6 +1,6 @@
 use Croma
 
-defmodule RaftKV.SizeCollector do
+defmodule RaftKV.StatsCollector do
   use GenServer
   alias RaftKV.{Hash, Table, Shard}
 
@@ -12,9 +12,9 @@ defmodule RaftKV.SizeCollector do
 
     defp collect_from_local_member({ks_name, range_start}, acc) do
       cg_name = Shard.consensus_group_name(ks_name, range_start)
-      case RaftedValue.query(cg_name, :get_total_size) do
-        {:ok, {:ok, n_keys, total_size}} ->
-          submap = Map.get(acc, ks_name, %{}) |> Map.put(range_start, {n_keys, total_size})
+      case RaftedValue.query(cg_name, :get_stats) do
+        {:ok, {:ok, n_keys, size, load, knf}} ->
+          submap = Map.get(acc, ks_name, %{}) |> Map.put(range_start, {n_keys, size, load, knf})
           Map.put(acc, ks_name, submap)
         {:ok, {:error, _uninitialized_or_post_merge_latter}} ->
           acc
@@ -51,7 +51,7 @@ defmodule RaftKV.SizeCollector do
   #
   # API
   #
-  defun get_all() :: %{atom => %{Hash.t => {non_neg_integer, non_neg_integer}}} do
+  defun get_all() :: %{atom => %{Hash.t => {non_neg_integer, non_neg_integer, non_neg_integer, non_neg_integer}}} do
     GenServer.call(__MODULE__, :get_all)
   end
 end

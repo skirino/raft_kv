@@ -223,7 +223,8 @@ defmodule RaftKV.Shard do
       {ret, load, new_keys, new_total} = apply_command_to_half(d, keys, total, key, command_arg)
       new_status = Status.remember_single_key_command(status, unquote(which), {key, command_arg})
       new_state = %__MODULE__{state | :status => new_status, unquote(keys_field) => new_keys, unquote(size_field) => new_total}
-      {{:ok, ret, load}, new_state}
+      add_load(load)
+      {{:ok, ret}, new_state}
     end
   end)
 
@@ -283,7 +284,8 @@ defmodule RaftKV.Shard do
           size_former_half: new_size1,
           size_latter_half: new_size2,
         }
-        {load1 + load2, new_state}
+        add_load(load1 + load2)
+        {:ok, new_state}
     end
   end
 
@@ -515,7 +517,7 @@ defmodule RaftKV.Shard do
       state          ->
         case arg do
           {:q, key, query_arg} -> query_impl(state, key, query_arg)
-          :get_total_size      -> get_total_size(state)
+          :get_stats           -> get_stats(state)
           :list_keys           -> list_keys(state)
           _                    -> :ok
         end
@@ -536,22 +538,28 @@ defmodule RaftKV.Shard do
 
   defp run_query(d, keys, key, query_arg) do
     case Map.get(keys, key) do
-      nil          -> {:error, :key_not_found}
+      nil ->
+        increment_knf()
+        {:error, :key_not_found}
       {data, size} ->
         {ret, load} = d.query(data, size, key, query_arg)
-        {:ok, ret, load}
+        add_load(load)
+        {:ok, ret}
     end
   end
 
-  defp get_total_size(%__MODULE__{status:           status,
-                                  keys_former_half: keys_former,
-                                  keys_latter_half: keys_latter,
-                                  size_former_half: s1,
-                                  size_latter_half: s2}) do
+  defp get_stats(%__MODULE__{status:           status,
+                             keys_former_half: keys_former,
+                             keys_latter_half: keys_latter,
+                             size_former_half: s1,
+                             size_latter_half: s2}) do
     case status do
       {:post_merge_latter, _} -> {:error, :post_merge_latter}
-      {:pre_split_latter , _} -> {:ok, 0                                            , 0      } # This shard hasn't yet acquire ownership of the keys.
-      _                       -> {:ok, map_size(keys_former) + map_size(keys_latter), s1 + s2}
+      {:pre_split_latter , _} -> {:ok, 0, 0, 0, 0} # This shard hasn't yet acquire ownership of the keys.
+      _                       ->
+        n_keys = map_size(keys_former) + map_size(keys_latter)
+        {load, knf} = reset_load_and_knf()
+        {:ok, n_keys, s1 + s2, load, knf}
     end
   end
 
@@ -565,27 +573,41 @@ defmodule RaftKV.Shard do
   end
 
   #
+  # recording "load" and "count of :key_not_found" in process dictionary
+  #
+  defp add_load(0), do: 0
+  defp add_load(load) do
+    new_load = Process.get(:raft_kv_load, 0) + load
+    Process.put(:raft_kv_load, new_load)
+  end
+
+  defp increment_knf() do
+    new_load = Process.get(:raft_kv_knf, 0) + 1
+    Process.put(:raft_kv_knf, new_load)
+  end
+
+  defp reset_load_and_knf() do
+    {Process.put(:raft_kv_load, 0) || 0, Process.put(:raft_kv_knf, 0) || 0}
+  end
+
+  #
   # hook
   #
   defmodule Hook do
     alias RaftedValue.Data, as: RVData
-    alias RaftKV.{Shard, LoadAccumulator}
+    alias RaftKV.Shard
 
     @behaviour RaftedValue.LeaderHook
 
+    @impl true
     defun on_command_committed(data_before :: v[:uninitialized | Shard.t],
                                command_arg :: RVData.command_arg,
                                command_ret :: RVData.command_ret,
                                data_after  :: v[:uninitialized | Shard.t]) :: any do
       case {command_arg, command_ret} do
-        {{:c, key, arg}, {:ok, ret, load}} ->
-          report_load(data_after, load)
-          run_on_command_hook(data_before, key, arg, ret, data_after)
-        {{:all_keys_command, arg}, load} when is_integer(load) ->
-          report_load(data_after, load)
-          run_on_command_hook_for_all_keys(data_before, arg, data_after)
-        _ ->
-          :ok
+        {{:c, key, arg}, {:ok, ret}}    -> run_on_command_hook(data_before, key, arg, ret, data_after)
+        {{:all_keys_command, arg}, :ok} -> run_on_command_hook_for_all_keys(data_before, arg, data_after)
+        _                               -> :ok
       end
     end
 
@@ -627,15 +649,15 @@ defmodule RaftKV.Shard do
       end)
     end
 
+    @impl true
     defun on_query_answered(data      :: v[:uninitialized | Shard.t],
                             query_arg :: RVData.query_arg,
                             query_ret :: RVData.query_ret) :: any do
       case query_arg do
         {:q, key, arg} ->
           case query_ret do
-            {:ok, ret, load}         -> report_load(data, load); run_on_query_hook(data, key, arg, ret)
-            {:error, :key_not_found} -> report_load(data, :key_not_found)
-            _                        -> :ok
+            {:ok, ret} -> run_on_query_hook(data, key, arg, ret)
+            _          -> :ok
           end
         _ -> :ok
       end
@@ -650,27 +672,25 @@ defmodule RaftKV.Shard do
       end
     end
 
+    @impl true
     defun on_follower_added(_data :: :uninitialized | Shard.t, _pid :: pid) :: any do
       :ok
     end
 
+    @impl true
     defun on_follower_removed(_data :: :uninitialized | Shard.t, _pid :: pid) :: any do
       :ok
     end
 
+    @impl true
     defun on_elected(_data :: :uninitialized | Shard.t) :: any do
-      :ok
+      Process.put(:raft_kv_load, 0)
+      Process.put(:raft_kv_knf , 0)
     end
 
+    @impl true
     defun on_restored_from_files(_data :: :uninitialized | Shard.t) :: any do
       :ok
-    end
-
-    defp report_load(_range, 0) do
-      :ok
-    end
-    defp report_load(%Shard{keyspace_name: ks_name, range_start: range_start}, load) do
-      LoadAccumulator.send_load(ks_name, range_start, load)
     end
   end
 

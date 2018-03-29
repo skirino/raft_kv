@@ -5,11 +5,11 @@ defmodule RaftKV.KeyspaceInfo do
 
   use Croma.Struct, fields: [
     policy: SplitMergePolicy,
-    shards: Croma.Tuple, # :gb_trees.tree(nil | :locked | last_split_merge_time, range_start, {n_keys, size, load})
+    shards: Croma.Tuple, # :gb_trees.tree(range_start, {nil | :locked | last_split_merge_time, nil | {n_keys, size, load}})
   ]
 
   defun make(policy :: v[SplitMergePolicy.t]) :: v[t] do
-    shards_with_1st = :gb_trees.insert(0, {nil, nil, nil, nil}, :gb_trees.empty())
+    shards_with_1st = :gb_trees.insert(0, {nil, nil}, :gb_trees.empty())
     %__MODULE__{policy: policy, shards: shards_with_1st}
   end
 
@@ -18,7 +18,7 @@ defmodule RaftKV.KeyspaceInfo do
   end
 
   defun add_shard(%__MODULE__{shards: shards} = info, new_range_start :: v[Hash.t]) :: v[t] do
-    new_shards = :gb_trees.insert(new_range_start, {:locked, nil, nil, nil}, shards)
+    new_shards = :gb_trees.insert(new_range_start, {:locked, nil}, shards)
     %__MODULE__{info | shards: new_shards}
   end
 
@@ -36,25 +36,22 @@ defmodule RaftKV.KeyspaceInfo do
   end
 
   defp touch1(shards, range_start, time) do
-    {_t, n, s, l} = :gb_trees.get(range_start, shards)
-    :gb_trees.update(range_start, {time, n, s, l}, shards)
+    {_t, stats_or_nil} = :gb_trees.get(range_start, shards)
+    :gb_trees.update(range_start, {time, stats_or_nil}, shards)
   end
-
-  @typep pair_or_nil :: nil | {non_neg_integer, non_neg_integer}
 
   defun store(%__MODULE__{policy: %SplitMergePolicy{load_per_query_to_missing_key: load_per_knf} = policy,
                           shards: shards} = info,
-              map            :: %{Hash.t => {pair_or_nil, pair_or_nil}},
+              map            :: %{Hash.t => {non_neg_integer, non_neg_integer, non_neg_integer, non_neg_integer}},
               threshold_time :: v[pos_integer]) :: {t, [{float, Hash.t}], [{float, Hash.t, Hash.t}]} do
     {new_shards, split_candidates, merge_candidates} =
-      Enum.reduce(map, {shards, [], []}, fn({range_start, pair_of_pairs}, {r1, scs1, mcs1}) ->
-        debug_assert(pair_of_pairs != {nil, nil})
-        case get_quad_and_update_shard(r1, load_per_knf, range_start, pair_of_pairs) do
+      Enum.reduce(map, {shards, [], []}, fn({range_start, stats_tuple4}, {r1, scs1, mcs1}) ->
+        case get_pair_and_update_shard(r1, load_per_knf, range_start, stats_tuple4) do
           nil ->
             {r1, scs1, mcs1}
-          {r2, quad} ->
+          {r2, pair} ->
             {scs2, mcs2} =
-              case compute_split_merge_demand(policy, r2, threshold_time, range_start, quad) do
+              case compute_split_merge_demand(policy, r2, threshold_time, range_start, pair) do
                 nil          -> {scs1       , mcs1       }
                 {:split, sc} -> {[sc | scs1], mcs1       }
                 {:merge, mc} -> {scs1       , [mc | mcs1]}
@@ -65,19 +62,13 @@ defmodule RaftKV.KeyspaceInfo do
     {%__MODULE__{info | shards: new_shards}, split_candidates, merge_candidates}
   end
 
-  defp get_quad_and_update_shard(shards, load_per_knf, range_start, pair_of_pairs) do
+  defp get_pair_and_update_shard(shards, load_per_knf, range_start, {n_keys, size, load, knf}) do
     case :gb_trees.lookup(range_start, shards) do
       :none ->
         nil
-      {:value, {t, _n, _s, _l}} ->
-        {n, s, l} =
-          case pair_of_pairs do
-            {{n_keys, size}, nil        } -> {n_keys, size, nil                      }
-            {nil           , {load, knf}} -> {nil   , nil , load + load_per_knf * knf}
-            {{n_keys, size}, {load, knf}} -> {n_keys, size, load + load_per_knf * knf}
-          end
-        q = {t, n, s, l}
-        {:gb_trees.update(range_start, q, shards), q}
+      {:value, {t, _stats}} ->
+        pair = {t, {n_keys, size, load + load_per_knf * knf}}
+        {:gb_trees.update(range_start, pair, shards), pair}
     end
   end
 
@@ -88,18 +79,14 @@ defmodule RaftKV.KeyspaceInfo do
                                   shards,
                                   threshold_time,
                                   range_start,
-                                  {last_split_merge_time, n_keys, size, load}) do
+                                  {last_split_merge_time, {n_keys, _, _} = stats}) do
     if max_keys || max_size || max_load do # at least 1 limit must be specified to perform split/merge
-      if n_keys do
-        debug_assert(size) # `size` should also be filled when `n_keys` is filled.
-        stats = {n_keys, size, load || 0} # If `load` is not filled (even though `n_keys` is filled), treat this as "no load".
-        if eligible_for_split_or_merge?(last_split_merge_time, threshold_time) do
-          limits = {max_keys, max_size, max_load}
-          case calc_max_ratio(stats, limits) do
-            max_ratio when max_ratio > 1.0 and n_keys > 1    -> {:split, {max_ratio, range_start}} # Don't split shard with `n_keys == 1`, as (probably) splitting won't help in that case.
-            max_ratio when max_ratio < merge_threshold_ratio -> compute_merge_demand(shards, threshold_time, range_start, merge_threshold_ratio, stats, limits)
-            _otherwise                                       -> nil
-          end
+      if eligible_for_split_or_merge?(last_split_merge_time, threshold_time) do
+        limits = {max_keys, max_size, max_load}
+        case calc_max_ratio(stats, limits) do
+          max_ratio when max_ratio > 1.0 and n_keys > 1    -> {:split, {max_ratio, range_start}} # Don't split shard with `n_keys <= 1`, as (probably) splitting won't help in that case.
+          max_ratio when max_ratio < merge_threshold_ratio -> compute_merge_demand(shards, threshold_time, range_start, merge_threshold_ratio, stats, limits)
+          _otherwise                                       -> nil
         end
       end
     end
@@ -107,16 +94,14 @@ defmodule RaftKV.KeyspaceInfo do
 
   defp compute_merge_demand(shards, threshold_time, range_start, merge_threshold_ratio, {n_keys, size, load}, limits) do
     case tree_next(shards, range_start) do
-      {next_range_start, {last_split_merge_time2, n_keys2, size2, load2}} when is_integer(n_keys2) ->
-        debug_assert(size2) # `size2` should also be filled when `n_keys2` is filled.
-        load2 = load2 || 0 # If `load2` is not filled (even though `n_keys2` is filled), treat this as "no load".
+      {next_range_start, {last_split_merge_time2, {n_keys2, size2, load2}}} ->
         if eligible_for_split_or_merge?(last_split_merge_time2, threshold_time) do
           max_ratio_when_merged = calc_max_ratio({n_keys + n_keys2, size + size2, load + load2}, limits)
           if max_ratio_when_merged < merge_threshold_ratio do
             {:merge, {max_ratio_when_merged, range_start, next_range_start}}
           end
         end
-      _no_next_or_n_keys2_is_nil ->
+      _no_next_or_stats_are_not_filled ->
         nil
     end
   end
@@ -143,13 +128,13 @@ defmodule RaftKV.KeyspaceInfo do
       case :gb_trees.lookup(range_start, shards) do
         :none ->
           :error
-        {:value, {_t, n, s, l}} ->
-          new_shards = :gb_trees.update(range_start, {:locked, n, s, l}, shards)
+        {:value, {_t, stats}} ->
+          new_shards = :gb_trees.update(range_start, {:locked, stats}, shards)
           new_info = %__MODULE__{info | shards: new_shards}
           range_end =
             case tree_next(shards, range_start) do
               nil            -> Hash.upper_bound()
-              {r_end, _quad} -> r_end
+              {r_end, _pair} -> r_end
             end
           {:ok, new_info, div(range_start + range_end, 2)}
       end
@@ -164,11 +149,11 @@ defmodule RaftKV.KeyspaceInfo do
                            range_start2 :: v[Hash.t]) :: {:ok, t} | :error do
     if :gb_trees.size(shards) > min_shards do
       case {:gb_trees.lookup(range_start1, shards), :gb_trees.lookup(range_start2, shards)} do
-        {:none                      , _                          } -> :error
-        {_                          , :none                      } -> :error
-        {{:value, {_t1, n1, s1, l1}}, {:value, {_t2, n2, s2, l2}}} ->
-          new_shards1 = :gb_trees.update(range_start1, {:locked, n1, s1, l1}, shards)
-          new_shards2 = :gb_trees.update(range_start2, {:locked, n2, s2, l2}, new_shards1)
+        {:none                  , _                      } -> :error
+        {_                      , :none                  } -> :error
+        {{:value, {_t1, stats1}}, {:value, {_t2, stats2}}} ->
+          new_shards1 = :gb_trees.update(range_start1, {:locked, stats1}, shards     )
+          new_shards2 = :gb_trees.update(range_start2, {:locked, stats2}, new_shards1)
           new_info = %__MODULE__{info | shards: new_shards2}
           {:ok, new_info}
       end
@@ -180,7 +165,7 @@ defmodule RaftKV.KeyspaceInfo do
   defp tree_next(shards, range_start) do
     case :gb_trees.iterator_from(range_start + 1, shards) |> :gb_trees.next() do
       :none                     -> nil
-      {next_start, quad, _iter} -> {next_start, quad}
+      {next_start, pair, _iter} -> {next_start, pair}
     end
   end
 end

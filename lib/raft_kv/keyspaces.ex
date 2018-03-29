@@ -346,28 +346,12 @@ defmodule RaftKV.Keyspaces do
     r
   end
 
-  defun submit_stats(size_map :: %{atom => %{Hash.t => non_neg_integer}},
-                     load_map :: %{atom => %{Hash.t => non_neg_integer}}) :: :ok do
-    merged_map = merge_maps(size_map, load_map)
-    if not Enum.empty?(merged_map) do
+  defun submit_stats(map :: %{atom => %{Hash.t => {non_neg_integer, non_neg_integer, non_neg_integer, non_neg_integer}}}) :: :ok do
+    if not Enum.empty?(map) do
       threshold_time = System.system_time(:milliseconds) - Config.shard_ineligible_period_after_split_or_merge()
-      {:ok, _} = RaftFleet.command(__MODULE__, {:stats, merged_map, threshold_time})
+      {:ok, _} = RaftFleet.command(__MODULE__, {:stats, map, threshold_time})
     end
     :ok
-  end
-
-  defp merge_maps(size_map, load_map) do
-    Enum.uniq(Map.keys(size_map) ++ Map.keys(load_map))
-    |> Map.new(fn ks_name ->
-      size_submap = Map.get(size_map, ks_name, %{})
-      load_submap = Map.get(load_map, ks_name, %{})
-      submap =
-        Enum.uniq(Map.keys(size_submap) ++ Map.keys(load_submap))
-        |> Map.new(fn range_start ->
-          {range_start, {Map.get(size_submap, range_start), Map.get(load_submap, range_start)}}
-        end)
-      {ks_name, submap}
-    end)
   end
 
   defun workflow_fetch_from_local_leader() :: v[nil | Workflow.t] do

@@ -1,8 +1,8 @@
 use Croma
 
-defmodule RaftKV.LocalStatsReporter do
+defmodule RaftKV.StatsReporter do
   use GenServer
-  alias RaftKV.{Config, SizeCollector, LoadAccumulator, Keyspaces}
+  alias RaftKV.{Config, StatsCollector, Keyspaces}
 
   defun start_link([]) :: GenServer.on_start do
     GenServer.start_link(__MODULE__, :ok)
@@ -17,9 +17,7 @@ defmodule RaftKV.LocalStatsReporter do
   @impl true
   def handle_info(:timeout, _state) do
     start_timer()
-    size_map = SizeCollector.get_all()
-    load_map = LoadAccumulator.get_all()
-    Keyspaces.submit_stats(size_map, load_map)
+    Keyspaces.submit_stats(StatsCollector.get_all())
     {:noreply, nil}
   end
   def handle_info(_delayed_reply, state) do
