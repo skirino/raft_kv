@@ -4,7 +4,7 @@ defmodule RaftKV.EtsRecordManager do
   use GenServer
   alias RaftKV.{Hash, Table}
 
-  @interval 5 * 60_000
+  @interval (if Mix.env() == :test, do: 10_000, else: 5 * 60_000)
 
   defun start_link([]) :: GenServer.on_start do
     GenServer.start_link(__MODULE__, :ok, [name: __MODULE__])
@@ -58,6 +58,11 @@ defmodule RaftKV.EtsRecordManager do
   #
   # API
   #
+  defun init() :: :ok do
+    Process.send_after(__MODULE__, :timeout, @interval)
+    :ok
+  end
+
   defun ensure_record_created(ks_name :: v[atom], range_start :: v[Hash.t]) :: :ok do
     GenServer.call(__MODULE__, {:ensure_record_created, ks_name, range_start})
   end

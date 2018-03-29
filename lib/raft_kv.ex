@@ -20,6 +20,7 @@ defmodule RaftKV do
           Enum.each(range_starts, &Table.insert(ks_name, &1))
         end)
     end
+    EtsRecordManager.init()
   end
 
   #
