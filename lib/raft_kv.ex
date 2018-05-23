@@ -164,7 +164,7 @@ defmodule RaftKV do
   defun query(keyspace_name :: g[atom],
               key           :: ValuePerKey.key,
               query_arg     :: ValuePerKey.query_arg,
-              options       :: [option] \\ []) :: {:ok, ValuePerKey.query_ret} | {:error, :key_not_found | :no_leader} do
+              options       :: [option] \\ []) :: {:ok, ValuePerKey.query_ret} | {:error, :key_not_found | :no_leader | :table_not_found} do
     timeout        = Keyword.get(options, :timeout       , @default_timeout       )
     retry          = Keyword.get(options, :retry         , @default_retry         )
     retry_interval = Keyword.get(options, :retry_interval, @default_retry_interval)
@@ -175,32 +175,35 @@ defmodule RaftKV do
   end
 
   defp call_impl(keyspace_name, key, options, f, attempts \\ 0) do
-    range_start = Table.lookup(keyspace_name, key)
-    cg_name = Shard.consensus_group_name(keyspace_name, range_start)
-    case f.(cg_name) do
-      {:error, _reason} = e -> e
-      {:ok, result}         ->
-        case result do
-          {:ok, _ret} = ok                 -> ok
-          {:error, :key_not_found} = e     -> e # Only for queries
-          {:error, {:below_range, _start}} ->
-            # The shard should have already been merged; the marker in ETS is already stale.
-            Table.delete(keyspace_name, range_start)
-            call_impl(keyspace_name, key, options, f)
-          {:error, {:above_range, range_end}} ->
-            # The shard should have already been split; we have to make a new marker for the newly-created shard.
-            Table.insert(keyspace_name, range_end)
-            call_impl(keyspace_name, key, options, f)
-          {:error, :will_own_the_key_retry_afterward} ->
-            # The shard has not yet shifted its range; retry after a sleep
-            max_retries = Keyword.get(options, :shard_lock_retry, @default_shard_lock_retry)
-            if attempts >= max_retries do
-              {:error, {:timeout_waiting_for_completion_of_split_or_merge, cg_name}}
-            else
-              interval = Keyword.get(options, :shard_lock_retry_interval, @default_shard_lock_retry_interval)
-              :timer.sleep(interval)
-              call_impl(keyspace_name, key, options, f, attempts + 1)
-            end
+    case Table.lookup(keyspace_name, key) do
+      {:error, :table_not_found} = e -> e
+      range_start ->
+        cg_name = Shard.consensus_group_name(keyspace_name, range_start)
+        case f.(cg_name) do
+          {:error, _reason} = e -> e
+          {:ok, result}         ->
+             case result do
+               {:ok, _ret} = ok                 -> ok
+               {:error, :key_not_found} = e     -> e # Only for queries
+               {:error, {:below_range, _start}} ->
+                  # The shard should have already been merged; the marker in ETS is already stale.
+                  Table.delete(keyspace_name, range_start)
+                  call_impl(keyspace_name, key, options, f)
+               {:error, {:above_range, range_end}} ->
+                  # The shard should have already been split; we have to make a new marker for the newly-created shard.
+                  Table.insert(keyspace_name, range_end)
+                  call_impl(keyspace_name, key, options, f)
+               {:error, :will_own_the_key_retry_afterward} ->
+                  # The shard has not yet shifted its range; retry after a sleep
+                  max_retries = Keyword.get(options, :shard_lock_retry, @default_shard_lock_retry)
+                  if attempts >= max_retries do
+                    {:error, {:timeout_waiting_for_completion_of_split_or_merge, cg_name}}
+                  else
+                    interval = Keyword.get(options, :shard_lock_retry_interval, @default_shard_lock_retry_interval)
+                    :timer.sleep(interval)
+                    call_impl(keyspace_name, key, options, f, attempts + 1)
+                 end
+             end
         end
     end
   end

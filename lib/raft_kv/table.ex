@@ -20,9 +20,11 @@ defmodule RaftKV.Table do
     :ok
   end
 
-  defun lookup(ks_name :: v[atom], key :: any) :: v[Hash.t] do
-    {^ks_name, range_start} = :ets.prev(@table, {ks_name, Hash.from_key(ks_name, key) + 1})
-    range_start
+  defun lookup(ks_name :: v[atom], key :: any) :: v[Hash.t | {:error, :table_not_found}] do
+    case :ets.prev(@table, {ks_name, Hash.from_key(ks_name, key) + 1}) do
+      {^ks_name, range_start} -> range_start
+      :"$end_of_table" -> {:error, :table_not_found}
+    end
   end
 
   defun ensure_record_created(ks_name :: v[atom], range_start :: v[Hash.t]) :: :ok do
