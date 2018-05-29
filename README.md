@@ -2,7 +2,7 @@
 
 An Elixir library to store key-value pairs in a distributed, fault-tolerant, self-adjusting data structure.
 
-- [API Documentation](http://hexdocs.pm/raft_kv/)
+- [API Documentation](https://hexdocs.pm/raft_kv/)
 - [Hex package information](https://hex.pm/packages/raft_kv)
 
 [![Hex.pm](http://img.shields.io/hexpm/v/raft_kv.svg)](https://hex.pm/packages/raft_kv)
