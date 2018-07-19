@@ -354,14 +354,14 @@ defmodule RaftKV.Keyspaces do
 
   defun submit_stats(map :: %{atom => %{Hash.t => {non_neg_integer, non_neg_integer, non_neg_integer, non_neg_integer}}}) :: :ok do
     if not Enum.empty?(map) do
-      threshold_time = System.system_time(:milliseconds) - Config.shard_ineligible_period_after_split_or_merge()
+      threshold_time = System.system_time(:millisecond) - Config.shard_ineligible_period_after_split_or_merge()
       {:ok, _} = RaftFleet.command(__MODULE__, {:stats, map, threshold_time})
     end
     :ok
   end
 
   defun workflow_fetch_from_local_leader() :: v[nil | Workflow.t] do
-    now = System.system_time(:milliseconds)
+    now = System.system_time(:millisecond)
     lock_period = Config.workflow_lock_period()
     case RaftedValue.command(__MODULE__, {:workflow_fetch, Node.self(), now, lock_period}) do
       {:ok, :locked}                  -> nil
@@ -371,7 +371,7 @@ defmodule RaftKV.Keyspaces do
   end
 
   defun workflow_proceed(pair :: v[Workflow.t]) :: v[nil | Workflow.t] do
-    {:ok, w} = RaftFleet.command(__MODULE__, {:workflow_proceed, pair, Node.self(), System.system_time(:milliseconds)})
+    {:ok, w} = RaftFleet.command(__MODULE__, {:workflow_proceed, pair, Node.self(), System.system_time(:millisecond)})
     w
   end
 
