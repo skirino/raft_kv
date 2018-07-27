@@ -6,7 +6,7 @@ defmodule RaftKV.MixProject do
   def project() do
     [
       app:               :raft_kv,
-      version:           "0.2.1",
+      version:           "0.2.2",
       elixir:            "~> 1.6",
       build_embedded:    Mix.env() == :prod,
       start_permanent:   Mix.env() == :prod,
@@ -16,7 +16,7 @@ defmodule RaftKV.MixProject do
       source_url:        @github_url,
       homepage_url:      @github_url,
       test_coverage:     [tool: ExCoveralls],
-      preferred_cli_env: ["coveralls": :test, "coveralls.detail": :test, "coveralls.post": :test, "coveralls.html": :test],
+      preferred_cli_env: [coveralls: :test, "coveralls.detail": :test, "coveralls.post": :test, "coveralls.html": :test],
     ]
   end
 
@@ -30,11 +30,11 @@ defmodule RaftKV.MixProject do
   defp deps() do
     [
       {:croma       , "~> 0.9"},
-      {:rafted_value, "~> 0.8"},
-      {:raft_fleet  , "~> 0.6"},
-      {:dialyze     , "~> 0.2" , [only: :dev]},
-      {:ex_doc      , "~> 0.14", [only: :dev]},
-      {:excoveralls , "~> 0.8" , [only: :test]},
+      {:rafted_value, "~> 0.9"},
+      {:raft_fleet  , "~> 0.8"},
+      {:dialyxir    , "~> 0.5"   , [only: :dev]},
+      {:ex_doc      , "~> 0.18.0", [only: :dev]},
+      {:excoveralls , "~> 0.9"   , [only: :test]},
     ]
   end
 
