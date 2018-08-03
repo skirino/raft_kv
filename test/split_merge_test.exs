@@ -6,6 +6,10 @@ defmodule RaftKV.SplitMergeTest do
   # In this test we want to test `SplitShard.transfer_latter_half/3` and `MergeShards.transfer_latter_half/3` in isolation,
   # and thus we don't call `RaftKV.init/0` (i.e., `Keyspaces` consensus group is not ready).
 
+  defmodule KV2 do
+    use KVBase, keyspace_name: :kv2
+  end
+
   @ks_name        :kv2
   @split_position div(Hash.upper_bound(), 2)
   @cg_former      :"#{@ks_name}_0"
@@ -13,7 +17,7 @@ defmodule RaftKV.SplitMergeTest do
 
   setup_all do
     :ok = RaftKV.add_1st_consensus_group(@ks_name, [])
-    :ok = Shard.initialize_1st_shard(@ks_name, KV, nil, 0, Hash.upper_bound())
+    :ok = Shard.initialize_1st_shard(@ks_name, KV2, nil, 0, Hash.upper_bound())
     :ok = SplitShard.create_consensus_group(@ks_name, 0, @split_position)
     groups = RaftFleet.consensus_groups() |> Map.keys() |> Enum.sort() # may contain `Keyspaces` depending on test execution order
     assert @cg_former in groups

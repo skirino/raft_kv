@@ -1,9 +1,14 @@
 defmodule RaftKVTest do
   use ExUnit.Case
   @moduletag timeout: 200_000
+  alias RaftKV.Config
 
-  @n_keys 1000
-  @ks_name :kv
+  defmodule KV1 do
+    use KVBase, keyspace_name: :kv1
+  end
+
+  @ks_name :kv1
+  @n_keys  1000
   @policy1 %RaftKV.SplitMergePolicy{max_shards: 8, min_shards: 4, max_keys_per_shard: 1000}
   @policy2 Map.put(@policy1, :max_keys_per_shard, 50)
 
@@ -23,10 +28,10 @@ defmodule RaftKVTest do
   defp get_or_inc_client_loop(i, n_inc \\ 0, n_times \\ 0) do
     n_inc2 =
       if rem(n_times, 2) == 0 do
-        assert KV.get(i) == n_inc
+        assert KV1.get(i) == n_inc
         n_inc
       else
-        assert KV.inc(i) == :ok
+        assert KV1.inc(i) == :ok
         n_inc + 1
       end
     receive do
@@ -90,12 +95,12 @@ defmodule RaftKVTest do
   end
 
   test "split/merge shards in a keyspace while handling client queries/commands" do
-    :ok = RaftKV.register_keyspace(@ks_name, [], KV, Hook, @policy1)
+    :ok = RaftKV.register_keyspace(@ks_name, [], KV1, Hook, @policy1)
     assert RaftKV.list_keyspaces() == [@ks_name]
-    assert RaftKV.register_keyspace(@ks_name, [], KV, Hook, @policy1) == {:error, :already_registered}
+    assert RaftKV.register_keyspace(@ks_name, [], KV1, Hook, @policy1) == {:error, :already_registered}
 
     keys = Enum.to_list(0 .. (@n_keys - 1))
-    Enum.each(keys, fn i -> KV.set(i, 0) end)
+    Enum.each(keys, fn i -> KV1.set(i, 0) end)
     assert consensus_group_names() |> length() == 1
 
     n_inc_alls =
@@ -112,13 +117,13 @@ defmodule RaftKVTest do
     Enum.each(keys, fn i ->
       # "Fetching all shard names and then running :inc as all_keys command" is inherently not rigorous;
       # we accept slight deviations from the expected value.
-      v = KV.get(i)
+      v = KV1.get(i)
       assert n_inc_all - 10 < v
       assert v              < n_inc_all + 10
     end)
 
     # reset values
-    Enum.each(keys, fn i -> KV.set(i, 0) end)
+    Enum.each(keys, fn i -> KV1.set(i, 0) end)
 
     n_increments =
       with_clients(@n_keys, &get_or_inc_client_loop/1, fn ->
@@ -131,12 +136,12 @@ defmodule RaftKVTest do
       end)
     assert get_all_keys() == keys
     Enum.each(n_increments, fn {i, n} ->
-      assert KV.get(i) == n
+      assert KV1.get(i) == n
     end)
 
     Enum.each(keys, fn i ->
-      :ok = KV.unset(i)
-      assert KV.get(i) == nil
+      :ok = KV1.unset(i)
+      assert KV1.get(i) == nil
     end)
     assert get_all_keys() == []
 
@@ -144,6 +149,22 @@ defmodule RaftKVTest do
     assert RaftKV.list_keyspaces() == []
     assert RaftKV.deregister_keyspace(@ks_name) == {:error, :no_such_keyspace}
     wait_until_all_consensus_groups_removed()
+  end
+
+  defmodule KVMulti1 do
+    use KVBase, keyspace_name: :kv_multi_1
+  end
+  defmodule KVMulti2 do
+    use KVBase, keyspace_name: :kv_multi_1
+  end
+
+  test "should register multiple keyspaces" do
+    :ok = RaftKV.register_keyspace(:kv_multi_1, [], KVMulti1, Hook, @policy1)
+    :timer.sleep(Config.stats_collection_interval() + 100)
+    :ok = RaftKV.register_keyspace(:kv_multi_2, [], KVMulti2, Hook, @policy1)
+    :timer.sleep(Config.stats_collection_interval() + 100)
+    :ok = RaftKV.deregister_keyspace(:kv_multi_2)
+    :ok = RaftKV.deregister_keyspace(:kv_multi_1)
   end
 
   test "error response in manipulating keyspaces" do

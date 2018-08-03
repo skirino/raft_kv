@@ -4,49 +4,55 @@ case RaftFleet.activate("zone") do
   {:error, :not_inactive} -> :ok
 end
 
-defmodule KV do
-  alias RaftKV.ValuePerKey
-  @behaviour ValuePerKey
+defmodule KVBase do
+  defmacro __using__([keyspace_name: ks]) do
+    quote bind_quoted: [ks: ks] do
+      @ks ks
 
-  @impl true
-  def command(_previous_value, _size, _key, {:set, value}) do
-    {:ok, 5, value, 1}
-  end
-  def command(_previous_value, _size, _key, :unset) do
-    {:ok, 5, nil, 0}
-  end
-  def command(value, _size, _key, :inc) do
-    {:ok, 5, value + 1, 1}
-  end
+      alias RaftKV.ValuePerKey
+      @behaviour ValuePerKey
 
-  @impl true
-  def query(value, _size, _key, :get) do
-    {value, 1}
-  end
+      @impl true
+      def command(_previous_value, _size, _key, {:set, value}) do
+        {:ok, 5, value, 1}
+      end
+      def command(_previous_value, _size, _key, :unset) do
+        {:ok, 5, nil, 0}
+      end
+      def command(value, _size, _key, :inc) do
+        {:ok, 5, value + 1, 1}
+      end
 
-  #
-  # API
-  #
-  def get(k) do
-    case RaftKV.query(:kv, k, :get) do
-      {:ok, v}                 -> v
-      {:error, :key_not_found} -> nil
+      @impl true
+      def query(value, _size, _key, :get) do
+        {value, 1}
+      end
+
+      #
+      # API
+      #
+      def get(k) do
+        case RaftKV.query(@ks, k, :get) do
+          {:ok, v}                 -> v
+          {:error, :key_not_found} -> nil
+        end
+      end
+
+      def set(k, v) do
+        {:ok, :ok} = RaftKV.command(@ks, k, {:set, v})
+        :ok
+      end
+
+      def unset(k) do
+        {:ok, :ok} = RaftKV.command(@ks, k, :unset)
+        :ok
+      end
+
+      def inc(k) do
+        {:ok, :ok} = RaftKV.command(@ks, k, :inc)
+        :ok
+      end
     end
-  end
-
-  def set(k, v) do
-    {:ok, :ok} = RaftKV.command(:kv, k, {:set, v})
-    :ok
-  end
-
-  def unset(k) do
-    {:ok, :ok} = RaftKV.command(:kv, k, :unset)
-    :ok
-  end
-
-  def inc(k) do
-    {:ok, :ok} = RaftKV.command(:kv, k, :inc)
-    :ok
   end
 end
 
