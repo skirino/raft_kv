@@ -147,7 +147,7 @@ defmodule RaftKV.Keyspaces do
       Enum.reduce(keyspaces, {%{}, [], []}, fn({ks_name, ks_info}, {m, scs1, mcs1}) ->
         {new_ks_info, scs2, mcs2} =
           case Map.get(stats_map, ks_name) do
-            nil    -> {ks_info, []}
+            nil    -> {ks_info, [], []}
             submap -> KeyspaceInfo.store(ks_info, submap, threshold_time)
           end
         scs3 = Enum.map(scs2, fn {usage, start} -> {usage, ks_name, start} end) ++ scs1
