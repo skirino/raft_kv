@@ -710,4 +710,16 @@ defmodule RaftKV.Shard do
     {:ok, r} = RaftFleet.command(cg_name, {:init_1st, keyspace_name, data_module, hook_module, range_start, range_end})
     r
   end
+
+  @default_rv_config_options [
+    heartbeat_timeout:                   1_000,
+    election_timeout:                    2_000,
+    election_timeout_clock_drift_margin: 1_000,
+    leader_hook_module:                  Hook,
+  ]
+
+  defun make_rv_config(rv_config_options :: Keyword.t \\ @default_rv_config_options) :: RaftedValue.Config.t do
+    opts = Keyword.put(rv_config_options, :leader_hook_module, Hook) # :leader_hook_module must not be changed
+    RaftedValue.make_config(__MODULE__, opts)
+  end
 end

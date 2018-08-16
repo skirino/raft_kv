@@ -95,9 +95,9 @@ defmodule RaftKVTest do
   end
 
   test "split/merge shards in a keyspace while handling client queries/commands" do
-    :ok = RaftKV.register_keyspace(@ks_name, [], KV1, Hook, @policy1)
+    :ok = RaftKV.register_keyspace(@ks_name, KV1, Hook, @policy1)
     assert RaftKV.list_keyspaces() == [@ks_name]
-    assert RaftKV.register_keyspace(@ks_name, [], KV1, Hook, @policy1) == {:error, :already_registered}
+    assert RaftKV.register_keyspace(@ks_name, KV1, Hook, @policy1) == {:error, :already_registered}
 
     keys = Enum.to_list(0 .. (@n_keys - 1))
     Enum.each(keys, fn i -> KV1.set(i, 0) end)
@@ -159,9 +159,9 @@ defmodule RaftKVTest do
   end
 
   test "should register multiple keyspaces" do
-    :ok = RaftKV.register_keyspace(:kv_multi_1, [], KVMulti1, Hook, @policy1)
+    :ok = RaftKV.register_keyspace(:kv_multi_1, KVMulti1, Hook, @policy1)
     :timer.sleep(Config.stats_collection_interval() + 100)
-    :ok = RaftKV.register_keyspace(:kv_multi_2, [], KVMulti2, Hook, @policy1)
+    :ok = RaftKV.register_keyspace(:kv_multi_2, KVMulti2, Hook, @policy1)
     :timer.sleep(Config.stats_collection_interval() + 100)
     :ok = RaftKV.deregister_keyspace(:kv_multi_2)
     :ok = RaftKV.deregister_keyspace(:kv_multi_1)

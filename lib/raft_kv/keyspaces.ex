@@ -336,14 +336,24 @@ defmodule RaftKV.Keyspaces do
   #
   # API
   #
+  @default_rv_config_options [
+    heartbeat_timeout:                   1_000,
+    election_timeout:                    2_000,
+    election_timeout_clock_drift_margin: 1_000,
+    leader_hook_module:                  Hook,
+  ]
+
+  defun make_rv_config(rv_config_options :: Keyword.t \\ @default_rv_config_options) :: RaftedValue.Config.t do
+    opts = Keyword.put(rv_config_options, :leader_hook_module, Hook) # :leader_hook_module must not be changed
+    RaftedValue.make_config(__MODULE__, opts)
+  end
+
   defun add_consensus_group() :: :ok | {:error, :already_added} do
-    rv_options = [
-      heartbeat_timeout:                   1_000,
-      election_timeout:                    2_000,
-      election_timeout_clock_drift_margin: 1_000,
-      leader_hook_module:                  Hook,
-    ]
-    rv_config = RaftedValue.make_config(__MODULE__, rv_options)
+    rv_config =
+      case RaftFleet.Config.rafted_value_config_maker() do
+        nil -> make_rv_config()
+        mod -> mod.make(__MODULE__)
+      end
     RaftFleet.add_consensus_group(__MODULE__, 3, rv_config)
   end
 

@@ -33,8 +33,12 @@ defmodule RaftKV do
   - `keyspace_name`:
     An atom that identifies the new keyspace.
   - `rv_config_options`:
-    A keyword list of options passed to `RaftedValue.make_config/2`.
-    The given options are used by all consensus groups in the newly-registered keyspace.
+    An optional keyword list of options passed to `RaftKV.Shard.make_rv_config/1`.
+    Regardless of this argument is given or not, if `:rafted_value_config_maker` option for `:raft_fleet`
+    is provided, `:raft_kv` uses it to create a `t:RaftedValue.Config.t/0` (in this case the argument is not used).
+    If `:rafted_value_config_maker` option does not exist, then falls back to `RaftKV.Shard.make_rv_config/1`.
+    The created `t:RaftedValue.Config.t/0` is used by all consensus groups in the newly-registered keyspace.
+    It's recommended that you omit this argument and provide your implementation of `RaftFleet.RaftedValueConfigMaker` behaviour.
   - `data_module`:
     A callback module that implements `RaftKV.ValuePerKey` behaviour.
   - `hook_module`:
@@ -44,7 +48,7 @@ defmodule RaftKV do
     See also `RaftKV.SplitMergePolicy`.
   """
   defun register_keyspace(keyspace_name     :: g[atom],
-                          rv_config_options :: Keyword.t,
+                          rv_config_options :: nil | Keyword.t \\ nil,
                           data_module       :: g[module],
                           hook_module       :: v[nil | module],
                           policy            :: SplitMergePolicy.t) :: :ok | {:error, :invalid_policy | :already_registered} do
@@ -60,10 +64,17 @@ defmodule RaftKV do
   end
 
   defpt add_1st_consensus_group(keyspace_name, rv_config_options) do
+    name = Shard.consensus_group_name(keyspace_name, 0)
     rv_config =
-      RaftedValue.make_config(Shard, rv_config_options)
-      |> Map.put(:leader_hook_module, Shard.Hook)
-    RaftFleet.add_consensus_group(Shard.consensus_group_name(keyspace_name, 0), 3, rv_config)
+      case RaftFleet.Config.rafted_value_config_maker() do
+        nil ->
+          case rv_config_options do
+            nil  -> Shard.make_rv_config()
+            opts -> Shard.make_rv_config(opts)
+          end
+        mod -> mod.make(name)
+      end
+    RaftFleet.add_consensus_group(name, 3, rv_config)
   end
 
   @doc """

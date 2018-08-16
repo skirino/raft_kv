@@ -65,7 +65,7 @@ Let's initialize `:raft_kv` and then register a keyspace.
 ```ex
 RaftFleet.activate("some_zone")
 RaftKV.init()
-RaftKV.register_keyspace(:kv, [], KV, nil, %RaftKV.SplitMergePolicy{max_shards: 16, max_keys_per_shard: 100})
+RaftKV.register_keyspace(:kv, KV, nil, %RaftKV.SplitMergePolicy{max_shards: 16, max_keys_per_shard: 100})
 ```
 
 Now we can get/set values with arbitrary keys.

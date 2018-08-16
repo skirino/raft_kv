@@ -86,14 +86,19 @@ defmodule RaftKV.Workflow do
 
     defpt create_consensus_group(ks_name, former_range_start, latter_range_start) do
       cg_name = Shard.consensus_group_name(ks_name, latter_range_start)
-      case RaftFleet.add_consensus_group(cg_name, 3, get_rv_config(ks_name, former_range_start)) do
+      rv_config =
+        case RaftFleet.Config.rafted_value_config_maker() do
+          nil -> get_rv_config_from_former(ks_name, former_range_start)
+          mod -> mod.make(cg_name)
+        end
+      case RaftFleet.add_consensus_group(cg_name, 3, rv_config) do
         :ok                      -> :ok
         {:error, :already_added} -> :ok
       end
       wait_until_consensus_members_are_ready(cg_name)
     end
 
-    defp get_rv_config(ks_name, former_range_start) do
+    defp get_rv_config_from_former(ks_name, former_range_start) do
       former_cg_name = Shard.consensus_group_name(ks_name, former_range_start)
       leader = RaftFleet.whereis_leader(former_cg_name)
       %{config: rv_config} = RaftedValue.status(leader)
