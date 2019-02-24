@@ -32,9 +32,9 @@ defmodule RaftKV.MixProject do
       {:croma       , "~> 0.9"},
       {:rafted_value, "~> 0.9"},
       {:raft_fleet  , "~> 0.8"},
-      {:dialyxir    , "~> 0.5"   , [only: :dev]},
-      {:ex_doc      , "~> 0.18.0", [only: :dev]},
-      {:excoveralls , "~> 0.9"   , [only: :test]},
+      {:dialyxir    , "~> 0.5"   , [only: :dev ]},
+      {:ex_doc      , "~> 0.18.0", [only: :dev ]},
+      {:excoveralls , "~> 0.10"  , [only: :test]},
     ]
   end
 
