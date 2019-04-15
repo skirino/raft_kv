@@ -54,10 +54,9 @@ defmodule RaftKVTest do
     end
   end
 
-  defp consensus_group_names() do
-    for {g, _} <- RaftFleet.consensus_groups(), String.starts_with?("#{g}", "#{@ks_name}_") do
-      g
-    end
+  defp count_shards() do
+    RaftFleet.consensus_groups()
+    |> Enum.count(fn {g, _} -> String.starts_with?("#{g}", "#{@ks_name}_") end)
   end
 
   defp wait_until_all_consensus_groups_removed(tries \\ 0) do
@@ -89,6 +88,7 @@ defmodule RaftKVTest do
 
   setup_all do
     :ok = RaftKV.init()
+    :ok = RaftKV.init() # should be idempotent
     assert RaftKV.list_keyspaces() == []
     assert RaftFleet.consensus_groups() |> Map.keys() == [RaftKV.Keyspaces]
     :ok
@@ -101,16 +101,16 @@ defmodule RaftKVTest do
 
     keys = Enum.to_list(0 .. (@n_keys - 1))
     Enum.each(keys, fn i -> KV1.set(i, 0) end)
-    assert consensus_group_names() |> length() == 1
+    assert count_shards() == 1
 
     n_inc_alls =
       with_clients(10, &inc_all_client_loop/1, fn ->
         switch_policy(@policy2)
         :timer.sleep(30_000)
-        assert consensus_group_names() |> length() == 8
+        assert count_shards() == 8
         switch_policy(@policy1)
         :timer.sleep(30_000)
-        assert consensus_group_names() |> length() == 4
+        assert count_shards() == 4
       end)
     n_inc_all = Enum.map(n_inc_alls, fn {_, n} -> n end) |> Enum.sum()
     assert get_all_keys() == keys
@@ -129,10 +129,10 @@ defmodule RaftKVTest do
       with_clients(@n_keys, &get_or_inc_client_loop/1, fn ->
         switch_policy(@policy2)
         :timer.sleep(30_000)
-        assert consensus_group_names() |> length() == 8
+        assert count_shards() == 8
         switch_policy(@policy1)
         :timer.sleep(30_000)
-        assert consensus_group_names() |> length() == 4
+        assert count_shards() == 4
       end)
     assert get_all_keys() == keys
     Enum.each(n_increments, fn {i, n} ->
