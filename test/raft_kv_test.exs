@@ -59,19 +59,18 @@ defmodule RaftKVTest do
     |> Enum.count(fn {g, _} -> String.starts_with?("#{g}", "#{@ks_name}_") end)
   end
 
-  defp wait_until_all_consensus_groups_removed(tries \\ 0) do
-    if tries > 10 do
-      raise "timeout in waiting for removal of consensus groups for #{@ks_name}!"
-    end
+  defp wait_until_all_consensus_groups_removed() do
     RaftFleet.consensus_groups()
-    |> Enum.filter(fn {g, _} ->
-      Atom.to_string(g) |> String.starts_with?("#{@ks_name}_")
-    end)
+    |> Map.keys()
+    |> Enum.filter(fn g -> String.starts_with?(Atom.to_string(g), "#{@ks_name}_") end)
     |> case do
-      []         -> :ok
-      _non_empty ->
-        :timer.sleep(1000)
-        wait_until_all_consensus_groups_removed(tries + 1)
+      []        -> :ok
+      [g | _gs] ->
+        ref = Process.monitor(g)
+        receive do
+          {:DOWN, ^ref, :process, _pid, _reason} -> :ok
+        end
+        wait_until_all_consensus_groups_removed()
     end
   end
 
@@ -94,13 +93,43 @@ defmodule RaftKVTest do
     :ok
   end
 
+  defp first_command_client_loop(i, n_inc \\ 0, n_times \\ 0) do
+    n_inc2 = n_inc + 1
+    ret =
+      try do
+        KV1.set(i, 10)
+      rescue
+        RuntimeError -> :ok
+      end
+    assert ret == :ok
+    receive do
+      :finish -> exit({:shutdown, n_inc2})
+    after
+      1 -> first_command_client_loop(i, n_inc2, n_times + 1)
+    end
+  end
+
+  test "initialization of shard should be masked by internal retrying" do
+    with_clients(100, &first_command_client_loop/1, fn ->
+      :ok = RaftKV.register_keyspace(@ks_name, KV1, Hook, @policy1)
+    end)
+
+    :ok = RaftKV.deregister_keyspace(@ks_name)
+    assert RaftKV.list_keyspaces() == []
+    assert RaftKV.deregister_keyspace(@ks_name) == {:error, :no_such_keyspace}
+    wait_until_all_consensus_groups_removed()
+  end
+
   test "split/merge shards in a keyspace while handling client queries/commands" do
     :ok = RaftKV.register_keyspace(@ks_name, KV1, Hook, @policy1)
     assert RaftKV.list_keyspaces() == [@ks_name]
     assert RaftKV.register_keyspace(@ks_name, KV1, Hook, @policy1) == {:error, :already_registered}
 
     keys = Enum.to_list(0 .. (@n_keys - 1))
-    Enum.each(keys, fn i -> KV1.set(i, 0) end)
+    Enum.each(keys, fn i ->
+      assert KV1.get(i) == nil
+      KV1.set(i, 0)
+    end)
     assert count_shards() == 1
 
     n_inc_alls =
@@ -149,6 +178,13 @@ defmodule RaftKVTest do
     assert RaftKV.list_keyspaces() == []
     assert RaftKV.deregister_keyspace(@ks_name) == {:error, :no_such_keyspace}
     wait_until_all_consensus_groups_removed()
+  end
+
+  test "should raise when command/query is issued for nonexisting keyspace" do
+    assert RaftKV.list_keyspaces() == []
+    assert RaftKV.deregister_keyspace(@ks_name) == {:error, :no_such_keyspace}
+    catch_error KV1.get(0)
+    catch_error KV1.set(0, 0)
   end
 
   defmodule KVMulti1 do
