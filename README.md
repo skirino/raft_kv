@@ -6,7 +6,7 @@ An Elixir library to store key-value pairs in a distributed, fault-tolerant, sel
 - [Hex package information](https://hex.pm/packages/raft_kv)
 
 [![Hex.pm](http://img.shields.io/hexpm/v/raft_kv.svg)](https://hex.pm/packages/raft_kv)
-[![Build Status](https://travis-ci.org/skirino/raft_kv.svg)](https://travis-ci.org/skirino/raft_kv)
+[![Build Status](https://travis-ci.com/skirino/raft_kv.svg)](https://travis-ci.com/github/skirino/raft_kv)
 [![Coverage Status](https://coveralls.io/repos/github/skirino/raft_kv/badge.svg?branch=master)](https://coveralls.io/github/skirino/raft_kv?branch=master)
 
 ## Feature & Design
